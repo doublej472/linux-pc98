@@ -803,6 +803,26 @@ static void tgui_copy_rect(struct pc98tridentfb *tfb,
 	writeb(1, tfb->regs + OLDCMD);
 }
 
+static void tgui_image_blit(struct pc98tridentfb *tfb, const char *data,
+			    u32 x, u32 y, u32 w, u32 h, u32 c, u32 b)
+{
+	unsigned int size = ((w + 31) >> 5) * h;
+
+	if (!tfb->mmio || !w || !h)
+		return;
+
+	tgui_wait_engine(tfb);
+	writeb(ROP_P, tfb->regs + 0x2127);
+	writel(c, tfb->regs + OLDCLR);
+	writel(b, tfb->regs + 0x2134);
+	writel(0x0040 | 0x4000, tfb->regs + DRAWFL);
+	writel(point(w - 1, h - 1), tfb->regs + OLDDIM);
+	writel(point(x, y), tfb->regs + OLDDST);
+	writeb(1, tfb->regs + OLDCMD);
+
+	iowrite32_rep(tfb->regs + 0x2100, data, size);
+}
+
 /* Address of first shown pixel in display memory */
 static void set_screen_start(struct pc98tridentfb *tfb, int base)
 {
@@ -877,13 +897,20 @@ static void tg_set_mode(struct pc98tridentfb *tfb, const struct tg_mode_entry *m
 	else
 		tg_crtc_write(tfb, 0x39, tg_crtc_read(tfb, 0x39) & ~0x07);
 
-	/* Enable PCI Retry on FIFO full */
-	tg_crtc_write(tfb, 0x55, tg_crtc_read(tfb, 0x55) | 0x01);
+	/* Enable PCI Retry on FIFO full + optimal watermark */
+	tg_crtc_write(tfb, 0x55, (tg_crtc_read(tfb, 0x55) & ~0x70) | 0x31);
 
 	/* Performance control: enable 32-bit CPU-VRAM path */
 	tg_crtc_write(tfb, 0x2f, tg_crtc_read(tfb, 0x2f) | 0x10);
 
-	tg_crtc_write(tfb, 0x38, 0x00);
+	/* Enable CPU write buffer and continuous 2D GE clock */
+	tg_crtc_write(tfb, 0x38, tg_crtc_read(tfb, 0x38) | 0x08);
+	tg_crtc_write(tfb, 0x3a, tg_crtc_read(tfb, 0x3a) | 0x10);
+
+	/* Enable 64-bit interleaved memory bus mode on 2MB/4MB VRAM */
+	if (tfb->vram_size >= 0x200000)
+		tg_crtc_write(tfb, 0x5e, tg_crtc_read(tfb, 0x5e) | 0x01);
+
 	tg_crtc_write(tfb, 0x50, 0);
 
 	for (i = 0; i <= 4; i++)
@@ -1197,6 +1224,25 @@ static void pc98tridentfb_copyarea(struct fb_info *info,
 	}
 }
 
+static void pc98tridentfb_imageblit(struct fb_info *info,
+				    const struct fb_image *img)
+{
+	struct pc98tridentfb *tfb = info->par;
+
+	if (!noaccel && tfb->mmio && img->depth == 1) {
+		u32 col = img->fg_color;
+		u32 bgcol = img->bg_color;
+
+		mutex_lock(&tfb->vram_lock);
+		tgui_image_blit(tfb, img->data, img->dx, img->dy,
+				img->width, img->height, col, bgcol);
+		mutex_unlock(&tfb->vram_lock);
+		sys_imageblit(info, img);
+	} else {
+		sys_imageblit(info, img);
+	}
+}
+
 static int pc98tridentfb_sync(struct fb_info *info)
 {
 	struct pc98tridentfb *tfb = info->par;
@@ -1237,6 +1283,7 @@ static const struct fb_ops pc98tridentfb_ops = {
 	.fb_pan_display	= pc98tridentfb_pan_display,
 	.fb_fillrect	= pc98tridentfb_fillrect,
 	.fb_copyarea	= pc98tridentfb_copyarea,
+	.fb_imageblit	= pc98tridentfb_imageblit,
 	.fb_sync	= pc98tridentfb_sync,
 	.fb_ioctl	= pc98tridentfb_ioctl,
 };
@@ -1346,7 +1393,7 @@ static int pc98tridentfb_probe(struct pci_dev *pdev,
 	info->screen_buffer = tfb->shadow;
 	info->screen_size = TG_MAX_FB_SIZE;
 	info->fbops = &pc98tridentfb_ops;
-	info->flags = FBINFO_VIRTFB | FBINFO_HWACCEL_COPYAREA | FBINFO_HWACCEL_FILLRECT | FBINFO_HWACCEL_YPAN;
+	info->flags = FBINFO_VIRTFB | FBINFO_HWACCEL_COPYAREA | FBINFO_HWACCEL_FILLRECT | FBINFO_HWACCEL_IMAGEBLIT | FBINFO_HWACCEL_YPAN;
 	info->fbdefio = &pc98tridentfb_defio;
 
 	ret = fb_alloc_cmap(&info->cmap, 256, 0);
