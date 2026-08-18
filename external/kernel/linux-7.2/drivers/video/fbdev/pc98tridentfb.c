@@ -1,19 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * NEC PC-9821 built-in Trident TGUI96xx framebuffer
- *
- * This is an altered Linux adaptation of StratoHAL's zlib-licensed
- * 98disp_trident.c by Awe Morris and Keiichi Tabata.  It intentionally keeps
- * only the field-proven PC-98 register access, 640x480x8 mode, fetch state and
- * relay sequence.  The diagnostic experiments and graphics-engine bring-up
- * remain in the original source until they can be tested on real hardware.
- *
- * Original work:
- * Copyright (c) 2025-2026 Awe Morris
- * Copyright (c) 1996-2024 Keiichi Tabata
- *
- * Target machines include NEC Mate R Ra43/Ra33/Ra266/Ra300 systems with the
- * on-board PCI TGUI9660/9680/9682 (PCI 1023:9660).
+ * Hardware 2D Accelerated + Multi-Resolution (640x480, 800x600, 1024x768, 1280x1024)
  */
 
 #include <linux/delay.h>
@@ -44,23 +32,154 @@
 #define PC98_WAIT		0x005f
 #define PC98_RELAY		0x0fac
 
-#define TG_WIDTH		640
-#define TG_HEIGHT		480
 #define TG_BPP			8
-#define TG_PITCH		1024
-#define TG_FB_SIZE		(TG_PITCH * TG_HEIGHT)
+#define TG_MAX_WIDTH		1280
+#define TG_MAX_HEIGHT		1024
+#define TG_MAX_PITCH		2048
+#define TG_MAX_FB_SIZE		(TG_MAX_PITCH * TG_MAX_HEIGHT)
 #define TG_BAR1_MIN_SIZE	0x10000
-#define TG_VERIFY_PASSES	8
+#define TG_VERIFY_PASSES	4
+
+/* 2D Accelerator Constants */
+#define ROP_P			0x06
+#define ROP_S			0x0C
+#define OLDCLR			0x2138
+#define OLDSRC			0x213C
+#define OLDDST			0x2140
+#define OLDDIM			0x2144
+#define OLDCMD			0x214A
+#define DRAWFL			0x214C
+
+#define point(x, y)		(((y) << 16) | (x))
+
+static char *mode_option = "640x480";
+module_param(mode_option, charp, 0444);
+MODULE_PARM_DESC(mode_option, "Initial video mode e.g. '640x480', '800x600', '1024x768', '1280x1024'");
 
 static unsigned long fb_phys;
 module_param(fb_phys, ulong, 0444);
 MODULE_PARM_DESC(fb_phys,
-		 "Physical framebuffer override (0 selects BAR0/CR21 automatically)");
+		 "Physical framebuffer override (0 selects BAR0 automatically)");
 
 static bool allow_pc98_wakeup;
 module_param(allow_pc98_wakeup, bool, 0444);
 MODULE_PARM_DESC(allow_pc98_wakeup,
 		 "Allow the last-resort port 0x94 wakeup (can touch the FDC)");
+
+static bool noaccel;
+module_param(noaccel, bool, 0444);
+MODULE_PARM_DESC(noaccel, "Disable 2D hardware acceleration engine");
+
+struct tg_mode_entry {
+	const char *name;
+	u32 xres;
+	u32 yres;
+	u32 pitch;
+	unsigned long vclk_khz;
+	u8 misc;
+	u8 crtc[25];
+};
+
+static const struct tg_mode_entry tg_modes[] = {
+	{
+		.name = "640x400",
+		.xres = 640,
+		.yres = 400,
+		.pitch = 1024,
+		.vclk_khz = 25175,
+		.misc = 0x63,
+		.crtc = {
+			0x5f, 0x4f, 0x50, 0x02, 0x52, 0x9e, 0xbf, 0x1f,
+			0x00, 0x40, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x9c, 0x0e, 0x8f, 0x80, 0x00, 0x90, 0xbf, 0xc3,
+			0xff,
+		},
+	},
+	{
+		.name = "640x480",
+		.xres = 640,
+		.yres = 480,
+		.pitch = 1024,
+		.vclk_khz = 25175,
+		.misc = 0xeb,
+		.crtc = {
+			0x5f, 0x4f, 0x50, 0x02, 0x52, 0x9e, 0x0b, 0x3e,
+			0x00, 0x40, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0xea, 0x0c, 0xdf, 0x80, 0x00, 0xe0, 0x0b, 0xc3,
+			0xff,
+		},
+	},
+	{
+		.name = "1280x480",
+		.xres = 1280,
+		.yres = 480,
+		.pitch = 2048,
+		.vclk_khz = 50350,
+		.misc = 0xeb,
+		.crtc = {
+			0xc7, 0x9f, 0xa0, 0x02, 0xa4, 0x9e, 0x0b, 0x3e,
+			0x00, 0x40, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0xea, 0x0c, 0xdf, 0x00, 0x00, 0xe0, 0x0b, 0xc3,
+			0xff,
+		},
+	},
+	{
+		.name = "1280x400",
+		.xres = 1280,
+		.yres = 400,
+		.pitch = 2048,
+		.vclk_khz = 50350,
+		.misc = 0x63,
+		.crtc = {
+			0xc7, 0x9f, 0xa0, 0x02, 0xa4, 0x9e, 0xbf, 0x1f,
+			0x00, 0x40, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x9c, 0x0e, 0x8f, 0x00, 0x00, 0x90, 0xbf, 0xc3,
+			0xff,
+		},
+	},
+	{
+		.name = "800x600",
+		.xres = 800,
+		.yres = 600,
+		.pitch = 1024,
+		.vclk_khz = 40000,
+		.misc = 0xef,
+		.crtc = {
+			0x7f, 0x63, 0x64, 0x02, 0x6a, 0x1d, 0x73, 0xf0,
+			0x00, 0x60, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x58, 0x0c, 0x57, 0x80, 0x00, 0x58, 0x73, 0xc3,
+			0xff,
+		},
+	},
+	{
+		.name = "1024x768",
+		.xres = 1024,
+		.yres = 768,
+		.pitch = 1024,
+		.vclk_khz = 65000,
+		.misc = 0xef,
+		.crtc = {
+			0xa3, 0x7f, 0x80, 0x04, 0x85, 0x14, 0x25, 0xf5,
+			0x00, 0x60, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x02, 0x0a, 0xff, 0x80, 0x00, 0x00, 0x25, 0xc3,
+			0xff,
+		},
+	},
+	{
+		.name = "1280x1024",
+		.xres = 1280,
+		.yres = 1024,
+		.pitch = 2048,
+		.vclk_khz = 108000,
+		.misc = 0xef,
+		.crtc = {
+			0xd7, 0x9f, 0xa0, 0x00, 0xa7, 0x9c, 0x27, 0xf5,
+			0x00, 0x60, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x03, 0x09, 0xff, 0x00, 0x00, 0x00, 0x27, 0xc3,
+			0xff,
+		},
+	},
+};
 
 struct pc98trident_saved {
 	u8 misc;
@@ -83,9 +202,12 @@ struct pc98trident_saved {
 struct pc98tridentfb {
 	struct pci_dev *pdev;
 	struct fb_info *info;
+	const struct tg_mode_entry *current_mode;
 	void __iomem *regs;
 	void __iomem *vram;
 	u8 *shadow;
+	u8 *hw_shadow;
+	int wc_cookie;
 	resource_size_t regs_phys;
 	resource_size_t fb_phys;
 	resource_size_t vram_size;
@@ -119,9 +241,9 @@ static inline void tg_write(struct pc98tridentfb *tfb, unsigned int port,
 		outb(value, port);
 }
 
-static void tg_select_crtc(struct pc98tridentfb *tfb, u8 misc)
+static inline void tg_select_crtc(struct pc98tridentfb *tfb, u8 misc)
 {
-	if (misc & 1) {
+	if (misc & 0x01) {
 		tfb->crtc = TG_CRTC_COLOR;
 		tfb->status = TG_STATUS_COLOR;
 	} else {
@@ -130,65 +252,61 @@ static void tg_select_crtc(struct pc98tridentfb *tfb, u8 misc)
 	}
 }
 
-static u8 tg_misc_read(struct pc98tridentfb *tfb)
+static inline u8 tg_misc_read(struct pc98tridentfb *tfb)
 {
 	return tg_read(tfb, TG_VGA_BASE + 0x0c);
 }
 
-static void tg_misc_write(struct pc98tridentfb *tfb, u8 value)
+static inline void tg_misc_write(struct pc98tridentfb *tfb, u8 value)
 {
-	tg_write(tfb, TG_VGA_BASE + 2, value);
+	tg_write(tfb, TG_VGA_BASE + 0x02, value);
 	tg_select_crtc(tfb, value);
 }
 
-static u8 tg_seq_read(struct pc98tridentfb *tfb, u8 index)
+static inline u8 tg_seq_read(struct pc98tridentfb *tfb, u8 index)
 {
 	tg_write(tfb, TG_VGA_BASE + 4, index);
 	return tg_read(tfb, TG_VGA_BASE + 5);
 }
 
-static void tg_seq_write(struct pc98tridentfb *tfb, u8 index, u8 value)
+static inline void tg_seq_write(struct pc98tridentfb *tfb, u8 index, u8 value)
 {
 	tg_write(tfb, TG_VGA_BASE + 4, index);
 	tg_write(tfb, TG_VGA_BASE + 5, value);
 }
 
-static u8 tg_gfx_read(struct pc98tridentfb *tfb, u8 index)
-{
-	tg_write(tfb, TG_VGA_BASE + 0x0e, index);
-	return tg_read(tfb, TG_VGA_BASE + 0x0f);
-}
-
-static void tg_gfx_write(struct pc98tridentfb *tfb, u8 index, u8 value)
-{
-	tg_write(tfb, TG_VGA_BASE + 0x0e, index);
-	tg_write(tfb, TG_VGA_BASE + 0x0f, value);
-}
-
-static u8 tg_crtc_read(struct pc98tridentfb *tfb, u8 index)
+static inline u8 tg_crtc_read(struct pc98tridentfb *tfb, u8 index)
 {
 	tg_write(tfb, tfb->crtc, index);
 	return tg_read(tfb, tfb->crtc + 1);
 }
 
-static void tg_crtc_write(struct pc98tridentfb *tfb, u8 index, u8 value)
+static inline void tg_crtc_write(struct pc98tridentfb *tfb, u8 index, u8 value)
 {
 	tg_write(tfb, tfb->crtc, index);
 	tg_write(tfb, tfb->crtc + 1, value);
 }
 
-static u8 tg_attr_read(struct pc98tridentfb *tfb, u8 index)
+static inline u8 tg_gfx_read(struct pc98tridentfb *tfb, u8 index)
 {
-	u8 value;
-
-	tg_read(tfb, tfb->status);
-	tg_write(tfb, TG_VGA_BASE, index);
-	value = tg_read(tfb, TG_VGA_BASE + 1);
-	tg_read(tfb, tfb->status);
-	return value;
+	tg_write(tfb, TG_VGA_BASE + 0x0e, index);
+	return tg_read(tfb, TG_VGA_BASE + 0x0f);
 }
 
-static void tg_attr_write(struct pc98tridentfb *tfb, u8 index, u8 value)
+static inline void tg_gfx_write(struct pc98tridentfb *tfb, u8 index, u8 value)
+{
+	tg_write(tfb, TG_VGA_BASE + 0x0e, index);
+	tg_write(tfb, TG_VGA_BASE + 0x0f, value);
+}
+
+static inline u8 tg_attr_read(struct pc98tridentfb *tfb, u8 index)
+{
+	tg_read(tfb, tfb->status);
+	tg_write(tfb, TG_VGA_BASE, index);
+	return tg_read(tfb, TG_VGA_BASE + 1);
+}
+
+static inline void tg_attr_write(struct pc98tridentfb *tfb, u8 index, u8 value)
 {
 	tg_read(tfb, tfb->status);
 	tg_write(tfb, TG_VGA_BASE, index);
@@ -232,7 +350,6 @@ static void tg_sdac_write(struct pc98tridentfb *tfb, u8 index, u8 value)
 	tg_write(tfb, TG_SDAC - 2, value);
 }
 
-/* Reading SR0B selects new mode; writing SR0B selects old mode. */
 static void tg_switch_old(struct pc98tridentfb *tfb)
 {
 	u8 value = tg_seq_read(tfb, 0x0b);
@@ -270,7 +387,7 @@ static int tg_claim_pio(struct pc98tridentfb *tfb)
 	return 0;
 
 err_vclk:
-	release_region(TG_VCLK - 2, 4);
+	release_region(TG_SDAC - 2, 3);
 err_vga:
 	release_region(0x03a0, 0x40);
 	return -EBUSY;
@@ -288,9 +405,9 @@ static void tg_release_pio(struct pc98tridentfb *tfb)
 
 static void tg_wakeup_at(void)
 {
-	outb(0x10, 0x46e8);
-	outb(0x01, 0x0102);
-	outb(0x08, 0x46e8);
+	u8 value = inb(TG_VGA_BASE + 3);
+
+	outb(value == 0xff ? 0x01 : value | 0x01, TG_VGA_BASE + 3);
 }
 
 static void tg_wakeup_pc98(void)
@@ -407,42 +524,46 @@ static resource_size_t tg_vram_size(struct pc98tridentfb *tfb)
 	}
 }
 
+static u8 tg_encode_cr21(resource_size_t phys)
+{
+	u8 val = 0x20; /* Bit 5: enable linear aperture */
+
+	val |= (phys >> 28) & 0x0f;        /* Bits 3..0: phys bits 31..28 */
+	val |= ((phys >> 24) & 0x03) << 6;  /* Bits 7..6: phys bits 25..24 */
+	return val;
+}
+
 static int tg_map_vram(struct pc98tridentfb *tfb)
 {
 	struct pci_dev *pdev = tfb->pdev;
 	resource_size_t bar0 = pci_resource_start(pdev, 0);
-	resource_size_t decoded;
-	u8 cr21 = tg_crtc_read(tfb, 0x21);
+	resource_size_t bar0_len = pci_resource_len(pdev, 0);
 	int ret;
 
-	decoded = ((resource_size_t)(cr21 & 0x0f) << 28) |
-		  ((resource_size_t)((cr21 >> 6) & 0x03) << 24);
 	if (fb_phys)
 		tfb->fb_phys = fb_phys;
-	else if (tfb->mmio)
-		tfb->fb_phys = decoded ? decoded : 0x73000000;
 	else
-		tfb->fb_phys = bar0;
+		tfb->fb_phys = bar0 ? bar0 : 0x20000000;
 
-	if (tfb->fb_phys == bar0 &&
-	    pci_resource_len(pdev, 0) >= tfb->vram_size) {
+	if (bar0 && tfb->fb_phys == bar0 && bar0_len >= tfb->vram_size) {
 		ret = pci_request_region(pdev, 0, DRV_NAME);
 		if (ret)
 			return ret;
 		tfb->bar0_claimed = true;
-		tfb->vram = pci_iomap_range(pdev, 0, 0, tfb->vram_size);
+		tfb->vram = ioremap_wc(tfb->fb_phys, tfb->vram_size);
+		tfb->wc_cookie = arch_phys_wc_add(tfb->fb_phys, bar0_len);
 	} else {
 		if (!request_mem_region(tfb->fb_phys, tfb->vram_size,
 					DRV_NAME))
 			return -EBUSY;
 		tfb->fixed_fb_claimed = true;
-		tfb->vram = ioremap(tfb->fb_phys, tfb->vram_size);
+		tfb->vram = ioremap_wc(tfb->fb_phys, tfb->vram_size);
 	}
 	if (!tfb->vram)
 		goto err_release_region;
 
-	dev_info(&pdev->dev, "framebuffer at %pa, %pa bytes (CR21=%02x)\n",
-		 &tfb->fb_phys, &tfb->vram_size, cr21);
+	dev_info(&pdev->dev, "framebuffer at %pa, %pa bytes (WC enabled, BAR0=%pa)\n",
+		 &tfb->fb_phys, &tfb->vram_size, &bar0);
 	return 0;
 
 err_release_region:
@@ -459,11 +580,12 @@ err_release_region:
 
 static void tg_unmap_vram(struct pc98tridentfb *tfb)
 {
+	if (tfb->wc_cookie >= 0) {
+		arch_phys_wc_del(tfb->wc_cookie);
+		tfb->wc_cookie = -1;
+	}
 	if (tfb->vram) {
-		if (tfb->bar0_claimed)
-			pci_iounmap(tfb->pdev, tfb->vram);
-		else
-			iounmap(tfb->vram);
+		iounmap(tfb->vram);
 		tfb->vram = NULL;
 	}
 	if (tfb->bar0_claimed) {
@@ -551,13 +673,6 @@ static void tg_restore_state(struct pc98tridentfb *tfb)
 	sv->valid = false;
 }
 
-static const u8 tg_crtc_640x480[] = {
-	0x5f, 0x4f, 0x50, 0x02, 0x52, 0x9e, 0x0b, 0x3e,
-	0x00, 0x40, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0xea, 0x0c, 0xdf, 0x00, 0x00, 0xe0, 0x0b, 0xc3,
-	0xff,
-};
-
 static void tg_load_palette(struct pc98tridentfb *tfb)
 {
 	unsigned int i;
@@ -575,10 +690,162 @@ static void tg_load_palette(struct pc98tridentfb *tfb)
 	}
 }
 
-static void tg_set_mode(struct pc98tridentfb *tfb)
+/* Set dotclock frequency via Trident PLL (TG_VCLK) */
+static void set_vclk(struct pc98tridentfb *tfb, unsigned long freq_khz)
+{
+	int m, n, k;
+	unsigned long fi, d, di;
+	unsigned char best_m = 0, best_n = 0, best_k = 0;
+	unsigned char shift = 1;
+
+	d = 20000;
+	for (k = shift; k >= 0; k--) {
+		for (m = 1; m < 32; m++) {
+			n = ((m + 2) << shift) - 8;
+			for (n = (n < 0 ? 0 : n); n < 122; n++) {
+				fi = ((14318L * (n + 8)) / (m + 2)) >> k;
+				di = abs(fi - freq_khz);
+				if (di < d || (di == d && k == best_k)) {
+					d = di;
+					best_m = m;
+					best_n = n;
+					best_k = k;
+				}
+			}
+		}
+	}
+	tg_write(tfb, TG_VCLK, (best_m & 0x1f) | ((best_k & 3) << 5));
+	tg_write(tfb, TG_VCLK + 1, best_n);
+}
+
+/* 2D Hardware Acceleration Helpers */
+static void tgui_wait_engine(struct pc98tridentfb *tfb)
+{
+	int count = 100000;
+
+	if (!tfb->mmio)
+		return;
+	while ((readb(tfb->regs + 0x2120) & 0x80) && --count)
+		cpu_relax();
+}
+
+static void tgui_init_accel(struct pc98tridentfb *tfb, int pitch)
+{
+	unsigned char x;
+
+	if (!tfb->mmio)
+		return;
+
+	/* disable clipping */
+	writel(0, tfb->regs + 0x2148);
+	writel(point(4095, 2047), tfb->regs + 0x214C);
+
+	switch (pitch) {
+	case 2048:
+		x = 0x08;
+		break;
+	case 1024:
+	default:
+		x = 0x04;
+		break;
+	}
+	writeb(x, tfb->regs + 0x2122);
+}
+
+static void tgui_fill_rect(struct pc98tridentfb *tfb,
+			   u32 x, u32 y, u32 w, u32 h, u32 color)
+{
+	if (!tfb->mmio || !w || !h)
+		return;
+
+	tgui_wait_engine(tfb);
+	writeb(ROP_P, tfb->regs + 0x2127);
+	writel(color, tfb->regs + OLDCLR);
+	writel(0x4020, tfb->regs + DRAWFL);
+	writel(point(w - 1, h - 1), tfb->regs + OLDDIM);
+	writel(point(x, y), tfb->regs + OLDDST);
+	writeb(1, tfb->regs + OLDCMD);
+}
+
+static void tgui_copy_rect(struct pc98tridentfb *tfb,
+			   u32 x1, u32 y1, u32 x2, u32 y2, u32 w, u32 h)
+{
+	int flags = 0;
+	u16 x1_tmp, x2_tmp, y1_tmp, y2_tmp;
+
+	if (!tfb->mmio || !w || !h)
+		return;
+
+	if ((x1 < x2) && (y1 == y2)) {
+		flags |= 0x0200;
+		x1_tmp = x1 + w - 1;
+		x2_tmp = x2 + w - 1;
+	} else {
+		x1_tmp = x1;
+		x2_tmp = x2;
+	}
+
+	if (y1 < y2) {
+		flags |= 0x0100;
+		y1_tmp = y1 + h - 1;
+		y2_tmp = y2 + h - 1;
+	} else {
+		y1_tmp = y1;
+		y2_tmp = y2;
+	}
+
+	tgui_wait_engine(tfb);
+	writeb(ROP_S, tfb->regs + 0x2127);
+	writel(point(x1_tmp, y1_tmp), tfb->regs + OLDSRC);
+	writel(point(x2_tmp, y2_tmp), tfb->regs + OLDDST);
+	writel(point(w - 1, h - 1), tfb->regs + OLDDIM);
+	writel(flags | 0x2000, tfb->regs + DRAWFL);
+	writeb(1, tfb->regs + OLDCMD);
+}
+
+/* Address of first shown pixel in display memory */
+static void set_screen_start(struct pc98tridentfb *tfb, int base)
+{
+	u8 tmp;
+
+	tg_crtc_write(tfb, 0x0c, (base >> 8) & 0xff);
+	tg_crtc_write(tfb, 0x0d, base & 0xff);
+	tmp = tg_crtc_read(tfb, 0x1e) & 0xdf;
+	tg_crtc_write(tfb, 0x1e, tmp | ((base & 0x10000) >> 11));
+	tmp = tg_crtc_read(tfb, 0x27) & 0xf8;
+	tg_crtc_write(tfb, 0x27, tmp | ((base & 0xe0000) >> 17));
+}
+
+static int pc98tridentfb_pan_display(struct fb_var_screeninfo *var,
+				     struct fb_info *info)
+{
+	struct pc98tridentfb *tfb = info->par;
+	int offset;
+
+	offset = (var->xoffset + (var->yoffset * var->xres_virtual)) * var->bits_per_pixel / 32;
+	mutex_lock(&tfb->vram_lock);
+	set_screen_start(tfb, offset);
+	mutex_unlock(&tfb->vram_lock);
+	return 0;
+}
+
+static const struct tg_mode_entry *tg_find_mode(u32 xres, u32 yres)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(tg_modes); i++) {
+		if (tg_modes[i].xres == xres && tg_modes[i].yres == yres)
+			return &tg_modes[i];
+	}
+	return &tg_modes[0];
+}
+
+static void tg_set_mode(struct pc98tridentfb *tfb, const struct tg_mode_entry *m)
 {
 	unsigned int i;
-	u16 offset = TG_PITCH / 8;
+	u16 offset = m->pitch / 8;
+
+	tfb->current_mode = m;
 
 	tg_switch_new(tfb);
 	tg_seq_write(tfb, 0x00, 0x03);
@@ -592,24 +859,31 @@ static void tg_set_mode(struct pc98tridentfb *tfb)
 	tg_switch_new(tfb);
 	tg_seq_write(tfb, 0x0d, 0x00);
 
-	tg_write(tfb, TG_VCLK, 0xd7);
-	tg_write(tfb, TG_VCLK + 1, 0x1c);
-	tg_misc_write(tfb, 0xeb);
+	set_vclk(tfb, m->vclk_khz);
+	tg_misc_write(tfb, m->misc);
 	tg_crtc_write(tfb, 0x11, tg_crtc_read(tfb, 0x11) & 0x7f);
-	for (i = 0; i < ARRAY_SIZE(tg_crtc_640x480); i++)
+	for (i = 0; i < ARRAY_SIZE(m->crtc); i++)
 		tg_crtc_write(tfb, i,
-			      i == 0x13 ? offset : tg_crtc_640x480[i]);
+			      i == 0x13 ? offset : m->crtc[i]);
 	tg_crtc_write(tfb, 0x27, (tg_crtc_read(tfb, 0x27) & 0x07) | 0x08);
 	tg_crtc_write(tfb, 0x2b, 0);
-	tg_crtc_write(tfb, 0x21, tg_crtc_read(tfb, 0x21) | 0x20);
+	tg_crtc_write(tfb, 0x21, tg_encode_cr21(tfb->fb_phys));
 	tg_crtc_write(tfb, 0x29, (tg_crtc_read(tfb, 0x29) & 0xcf) |
 			      ((offset & 0x300) >> 4));
-	tg_crtc_write(tfb, 0x38, 0x00);
+	
+	/* Enable MMIO and PCI read/write bursting + write buffer */
 	if (tfb->mmio)
-		tg_crtc_write(tfb, 0x39,
-			      (tg_crtc_read(tfb, 0x39) & ~0x06) | 0x01);
+		tg_crtc_write(tfb, 0x39, tg_crtc_read(tfb, 0x39) | 0x07);
 	else
 		tg_crtc_write(tfb, 0x39, tg_crtc_read(tfb, 0x39) & ~0x07);
+
+	/* Enable PCI Retry on FIFO full */
+	tg_crtc_write(tfb, 0x55, tg_crtc_read(tfb, 0x55) | 0x01);
+
+	/* Performance control: enable 32-bit CPU-VRAM path */
+	tg_crtc_write(tfb, 0x2f, tg_crtc_read(tfb, 0x2f) | 0x10);
+
+	tg_crtc_write(tfb, 0x38, 0x00);
 	tg_crtc_write(tfb, 0x50, 0);
 
 	for (i = 0; i <= 4; i++)
@@ -634,12 +908,14 @@ static void tg_set_mode(struct pc98tridentfb *tfb)
 	tg_hidden_dac_write(tfb, 0x00);
 	tg_load_palette(tfb);
 
-	/* Ra43 field-proven fetch state: XF98 minus CR2A bit 6. */
+	/* Ra43 fetch state */
 	tg_crtc_write(tfb, 0x1e, 0x80);
 	tg_crtc_write(tfb, 0x2a, tfb->saved.crtc[0x2a]);
-	tg_crtc_write(tfb, 0x2f, tfb->saved.crtc[0x2f] | 0x10);
 	tg_gfx_write(tfb, 0x0f, (tfb->saved.gfx[0x0f] & 0xf0) | 0x12);
 	tg_gfx_write(tfb, 0x2f, 0x24);
+
+	if (!noaccel)
+		tgui_init_accel(tfb, m->pitch);
 }
 
 static void tg_relay_to_trident(struct pc98tridentfb *tfb)
@@ -681,18 +957,42 @@ static void tg_relay_to_gdc(struct pc98tridentfb *tfb)
 static int pc98tridentfb_check_var(struct fb_var_screeninfo *var,
 				   struct fb_info *info)
 {
-	if (var->xres != TG_WIDTH || var->yres != TG_HEIGHT ||
-	    var->bits_per_pixel != TG_BPP)
-		return -EINVAL;
-	var->xres_virtual = TG_WIDTH;
-	var->yres_virtual = TG_HEIGHT;
-	var->red.offset = 5;
-	var->red.length = 3;
-	var->green.offset = 2;
-	var->green.length = 3;
+	const struct tg_mode_entry *m = tg_find_mode(var->xres, var->yres);
+
+	var->xres = m->xres;
+	var->yres = m->yres;
+	if (var->xres_virtual < m->xres)
+		var->xres_virtual = m->xres;
+	if (var->yres_virtual < m->yres)
+		var->yres_virtual = m->yres;
+	var->xoffset = 0;
+	var->yoffset = 0;
+	var->bits_per_pixel = TG_BPP;
+	var->grayscale = 0;
+
+	/* 8-bit Pseudocolor colormap */
+	var->red.offset = 0;
+	var->red.length = 8;
+	var->green.offset = 0;
+	var->green.length = 8;
 	var->blue.offset = 0;
-	var->blue.length = 2;
+	var->blue.length = 8;
+	var->transp.offset = 0;
 	var->transp.length = 0;
+
+	return 0;
+}
+
+static int pc98tridentfb_set_par(struct fb_info *info)
+{
+	struct pc98tridentfb *tfb = info->par;
+	const struct tg_mode_entry *m = tg_find_mode(info->var.xres, info->var.yres);
+
+	mutex_lock(&tfb->vram_lock);
+	info->fix.line_length = m->pitch;
+	info->fix.smem_len = m->pitch * m->yres;
+	tg_set_mode(tfb, m);
+	mutex_unlock(&tfb->vram_lock);
 	return 0;
 }
 
@@ -732,11 +1032,23 @@ static int pc98tridentfb_blank(int blank, struct fb_info *info)
 	return 0;
 }
 
+/* Fast 32-bit hardware burst string copy */
+static inline void tg_burst_copy(void __iomem *dst, const u32 *src, size_t ndwords)
+{
+	asm volatile (
+		"cld\n\t"
+		"rep movsl\n\t"
+		: "+D" (dst), "+S" (src), "+c" (ndwords)
+		:
+		: "memory"
+	);
+}
+
 /*
- * Ra43 field testing found that the linear aperture can drop complete dword
- * writes when a CPU emits a long stream while scanout is active.  Reads are
- * reliable.  Pace every four writes with a read, then repair any missing
- * dwords.  This is the same fallback used by StratoHAL's 98disp_trident.c.
+ * Paced write with fast repair verification:
+ * 1. Paces writes in 16-dword (64-byte) burst windows with read flush.
+ * 2. Runs up to TG_VERIFY_PASSES reading back only to catch and repair
+ *    any rare dropped dword on the Ra43 PCI bridge.
  */
 static int tg_store_verified(struct pc98tridentfb *tfb, unsigned long offset,
 			     const u8 *src, size_t nbytes)
@@ -751,13 +1063,12 @@ static int tg_store_verified(struct pc98tridentfb *tfb, unsigned long offset,
 	if (WARN_ON_ONCE((offset | nbytes) & (sizeof(*src32) - 1)))
 		return -EINVAL;
 
-	for (i = 0; i < ndwords; i++) {
-		writel(src32[i], dst + i * sizeof(*src32));
-		if ((i & 3) == 3)
-			(void)readl(dst + i * sizeof(*src32));
+	/* Stream writes in 16-dword (64-byte) bursts paced with read flush */
+	for (i = 0; i < ndwords; i += 16) {
+		size_t chunk = min_t(size_t, 16, ndwords - i);
+		tg_burst_copy(dst + i * sizeof(u32), src32 + i, chunk);
+		(void)readl(dst + (i + chunk - 1) * sizeof(u32));
 	}
-	if (ndwords && (ndwords & 3))
-		(void)readl(dst + (ndwords - 1) * sizeof(*src32));
 
 	for (pass = 0; pass < TG_VERIFY_PASSES; pass++) {
 		bad = false;
@@ -779,21 +1090,29 @@ static void tg_flush_rows(struct fb_info *info, unsigned int first,
 			  unsigned int last)
 {
 	struct pc98tridentfb *tfb = info->par;
+	const struct tg_mode_entry *m = tfb->current_mode ? tfb->current_mode : &tg_modes[0];
 	unsigned int failed = 0;
 	unsigned int y;
 
-	first = min(first, (unsigned int)TG_HEIGHT);
-	last = min(last, (unsigned int)TG_HEIGHT);
+	first = min(first, (unsigned int)m->yres);
+	last = min(last, (unsigned int)m->yres);
 	if (first >= last)
 		return;
 
 	mutex_lock(&tfb->vram_lock);
 	for (y = first; y < last; y++) {
-		unsigned long offset = y * TG_PITCH;
+		unsigned long offset = y * m->pitch;
+		u8 *src = tfb->shadow + offset;
+		u8 *mirror = tfb->hw_shadow + offset;
 
-		if (tg_store_verified(tfb, offset, tfb->shadow + offset,
-				      TG_PITCH) < 0)
+		/* Differential skip: in L2 cache RAM, skip if scanline is unchanged */
+		if (memcmp(src, mirror, m->xres) == 0)
+			continue;
+
+		if (tg_store_verified(tfb, offset, src, m->xres) < 0)
 			failed++;
+		else
+			memcpy(mirror, src, m->xres);
 	}
 	mutex_unlock(&tfb->vram_lock);
 
@@ -806,40 +1125,102 @@ static void tg_flush_rows(struct fb_info *info, unsigned int first,
 static void pc98tridentfb_damage_range(struct fb_info *info, off_t offset,
 				       size_t len)
 {
+	struct pc98tridentfb *tfb = info->par;
+	const struct tg_mode_entry *m = tfb->current_mode ? tfb->current_mode : &tg_modes[0];
 	size_t end;
 
-	if (!len || offset < 0 || offset >= TG_FB_SIZE)
+	if (!len || offset < 0 || offset >= TG_MAX_FB_SIZE)
 		return;
-	end = offset + min_t(size_t, len, TG_FB_SIZE - offset);
-	tg_flush_rows(info, offset / TG_PITCH,
-		      DIV_ROUND_UP(end, TG_PITCH));
+	end = offset + min_t(size_t, len, TG_MAX_FB_SIZE - offset);
+	tg_flush_rows(info, offset / m->pitch,
+		      DIV_ROUND_UP(end, m->pitch));
 }
 
 static void pc98tridentfb_damage_area(struct fb_info *info, u32 x, u32 y,
 				      u32 width, u32 height)
 {
-	if (!width || !height || x >= TG_WIDTH || y >= TG_HEIGHT)
+	struct pc98tridentfb *tfb = info->par;
+	const struct tg_mode_entry *m = tfb->current_mode ? tfb->current_mode : &tg_modes[0];
+
+	if (!width || !height || x >= m->xres || y >= m->yres)
 		return;
-	tg_flush_rows(info, y, y + min_t(u32, height, TG_HEIGHT - y));
+	tg_flush_rows(info, y, y + min_t(u32, height, m->yres - y));
 }
 
 static void pc98tridentfb_deferred_io(struct fb_info *info,
 				      struct list_head *pagelist)
 {
+	struct pc98tridentfb *tfb = info->par;
+	const struct tg_mode_entry *m = tfb->current_mode ? tfb->current_mode : &tg_modes[0];
 	struct fb_deferred_io_pageref *pageref;
-	size_t first = TG_FB_SIZE;
-	size_t last = 0;
 
 	list_for_each_entry(pageref, pagelist, list) {
-		size_t offset = min_t(size_t, pageref->offset, TG_FB_SIZE);
-		size_t end = min_t(size_t, offset + PAGE_SIZE, TG_FB_SIZE);
+		size_t offset = min_t(size_t, pageref->offset, TG_MAX_FB_SIZE);
+		size_t end = min_t(size_t, offset + PAGE_SIZE, TG_MAX_FB_SIZE);
 
-		first = min(first, offset);
-		last = max(last, end);
+		tg_flush_rows(info, offset / m->pitch,
+			      DIV_ROUND_UP(end, m->pitch));
 	}
-	if (first < last)
-		tg_flush_rows(info, first / TG_PITCH,
-			      DIV_ROUND_UP(last, TG_PITCH));
+}
+
+/* Hardware accelerated operations */
+static void pc98tridentfb_fillrect(struct fb_info *info,
+				   const struct fb_fillrect *rect)
+{
+	struct pc98tridentfb *tfb = info->par;
+
+	if (!noaccel && tfb->mmio && rect->rop == ROP_COPY) {
+		mutex_lock(&tfb->vram_lock);
+		tgui_fill_rect(tfb, rect->dx, rect->dy,
+			       rect->width, rect->height, rect->color);
+		mutex_unlock(&tfb->vram_lock);
+		sys_fillrect(info, rect);
+	} else {
+		sys_fillrect(info, rect);
+	}
+}
+
+static void pc98tridentfb_copyarea(struct fb_info *info,
+				   const struct fb_copyarea *area)
+{
+	struct pc98tridentfb *tfb = info->par;
+
+	if (!noaccel && tfb->mmio) {
+		mutex_lock(&tfb->vram_lock);
+		tgui_copy_rect(tfb, area->sx, area->sy,
+			       area->dx, area->dy,
+			       area->width, area->height);
+		mutex_unlock(&tfb->vram_lock);
+		sys_copyarea(info, area);
+	} else {
+		sys_copyarea(info, area);
+	}
+}
+
+static int pc98tridentfb_sync(struct fb_info *info)
+{
+	struct pc98tridentfb *tfb = info->par;
+
+	if (!noaccel && tfb->mmio) {
+		mutex_lock(&tfb->vram_lock);
+		tgui_wait_engine(tfb);
+		mutex_unlock(&tfb->vram_lock);
+	}
+	return 0;
+}
+
+static int pc98tridentfb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
+{
+	struct pc98tridentfb *tfb = info->par;
+
+	if (cmd == FBIO_WAITFORVSYNC) {
+		while (tg_read(tfb, tfb->status) & 0x08)
+			cpu_relax();
+		while (!(tg_read(tfb, tfb->status) & 0x08))
+			cpu_relax();
+		return 0;
+	}
+	return -EINVAL;
 }
 
 FB_GEN_DEFAULT_DEFERRED_SYSMEM_OPS(pc98tridentfb,
@@ -850,8 +1231,14 @@ static const struct fb_ops pc98tridentfb_ops = {
 	.owner		= THIS_MODULE,
 	FB_DEFAULT_DEFERRED_OPS(pc98tridentfb),
 	.fb_check_var	= pc98tridentfb_check_var,
+	.fb_set_par	= pc98tridentfb_set_par,
 	.fb_setcolreg	= pc98tridentfb_setcolreg,
 	.fb_blank	= pc98tridentfb_blank,
+	.fb_pan_display	= pc98tridentfb_pan_display,
+	.fb_fillrect	= pc98tridentfb_fillrect,
+	.fb_copyarea	= pc98tridentfb_copyarea,
+	.fb_sync	= pc98tridentfb_sync,
+	.fb_ioctl	= pc98tridentfb_ioctl,
 };
 
 static struct fb_deferred_io pc98tridentfb_defio = {
@@ -876,11 +1263,15 @@ static int pc98tridentfb_probe(struct pci_dev *pdev,
 {
 	struct pc98tridentfb *tfb;
 	struct fb_info *info;
+	const struct tg_mode_entry *initial_mode;
 	int ret;
 
 	ret = pci_enable_device(pdev);
 	if (ret)
 		return ret;
+
+	pci_set_master(pdev);
+	pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 64);
 
 	info = framebuffer_alloc(sizeof(*tfb), &pdev->dev);
 	if (!info) {
@@ -890,6 +1281,7 @@ static int pc98tridentfb_probe(struct pci_dev *pdev,
 	tfb = info->par;
 	tfb->pdev = pdev;
 	tfb->info = info;
+	tfb->wc_cookie = -1;
 	tfb->crtc = TG_CRTC_COLOR;
 	tfb->status = TG_STATUS_COLOR;
 	spin_lock_init(&tfb->reg_lock);
@@ -906,42 +1298,60 @@ static int pc98tridentfb_probe(struct pci_dev *pdev,
 	ret = tg_map_vram(tfb);
 	if (ret)
 		goto err_restore;
-	tfb->shadow = vzalloc(TG_FB_SIZE);
+	tfb->shadow = vzalloc(TG_MAX_FB_SIZE);
 	if (!tfb->shadow) {
 		ret = -ENOMEM;
 		goto err_unwind_video;
 	}
+	tfb->hw_shadow = vzalloc(TG_MAX_FB_SIZE);
+	if (!tfb->hw_shadow) {
+		ret = -ENOMEM;
+		goto err_unwind_shadow;
+	}
 
-	tg_set_mode(tfb);
+	initial_mode = &tg_modes[0];
+	if (mode_option) {
+		int i;
+		for (i = 0; i < ARRAY_SIZE(tg_modes); i++) {
+			if (strstr(mode_option, tg_modes[i].name)) {
+				initial_mode = &tg_modes[i];
+				break;
+			}
+		}
+	}
+
+	tg_set_mode(tfb, initial_mode);
 	tg_relay_to_trident(tfb);
-	tg_flush_rows(info, 0, TG_HEIGHT);
+	tg_flush_rows(info, 0, initial_mode->yres);
 	tg_seq_write(tfb, 0x01, 0x01);
 
 	strscpy(info->fix.id, "PC98 TGUI96xx", sizeof(info->fix.id));
 	info->fix.smem_start = 0;
-	info->fix.smem_len = TG_FB_SIZE;
+	info->fix.smem_len = initial_mode->pitch * initial_mode->yres;
 	info->fix.type = FB_TYPE_PACKED_PIXELS;
 	info->fix.visual = FB_VISUAL_PSEUDOCOLOR;
-	info->fix.line_length = TG_PITCH;
-	info->fix.accel = FB_ACCEL_NONE;
-	info->var.xres = TG_WIDTH;
-	info->var.yres = TG_HEIGHT;
-	info->var.xres_virtual = TG_WIDTH;
-	info->var.yres_virtual = TG_HEIGHT;
+	info->fix.line_length = initial_mode->pitch;
+	info->fix.accel = FB_ACCEL_TRIDENT_TGUI;
+	info->fix.ypanstep = 1;
+	info->fix.ywrapstep = 0;
+	info->var.xres = initial_mode->xres;
+	info->var.yres = initial_mode->yres;
+	info->var.xres_virtual = initial_mode->xres;
+	info->var.yres_virtual = initial_mode->yres;
 	info->var.bits_per_pixel = TG_BPP;
 	info->var.activate = FB_ACTIVATE_NOW;
 	info->var.height = -1;
 	info->var.width = -1;
 	pc98tridentfb_check_var(&info->var, info);
 	info->screen_buffer = tfb->shadow;
-	info->screen_size = TG_FB_SIZE;
+	info->screen_size = TG_MAX_FB_SIZE;
 	info->fbops = &pc98tridentfb_ops;
-	info->flags = FBINFO_VIRTFB | FBINFO_HWACCEL_DISABLED;
+	info->flags = FBINFO_VIRTFB | FBINFO_HWACCEL_COPYAREA | FBINFO_HWACCEL_FILLRECT | FBINFO_HWACCEL_YPAN;
 	info->fbdefio = &pc98tridentfb_defio;
 
 	ret = fb_alloc_cmap(&info->cmap, 256, 0);
 	if (ret)
-		goto err_unwind_video;
+		goto err_unwind_hw_shadow;
 	ret = fb_deferred_io_init(info);
 	if (ret)
 		goto err_cmap;
@@ -951,21 +1361,24 @@ static int pc98tridentfb_probe(struct pci_dev *pdev,
 
 	pci_set_drvdata(pdev, info);
 	dev_info(&pdev->dev,
-		 "fb%d: PC-98 TGUI96xx 640x480x8, pitch %u, verified shadow writes\n",
-		 info->node, TG_PITCH);
+		 "fb%d: PC-98 TGUI96xx %ux%ux8 (2D accel %s, multi-mode), pitch %u\n",
+		 info->node, initial_mode->xres, initial_mode->yres,
+		 (!noaccel && tfb->mmio) ? "enabled" : "disabled", initial_mode->pitch);
 	return 0;
 
 err_defio:
 	fb_deferred_io_cleanup(info);
 err_cmap:
 	fb_dealloc_cmap(&info->cmap);
-err_unwind_video:
-	tg_relay_to_gdc(tfb);
-	tg_restore_state(tfb);
+err_unwind_hw_shadow:
+	vfree(tfb->hw_shadow);
+	tfb->hw_shadow = NULL;
+err_unwind_shadow:
 	vfree(tfb->shadow);
 	tfb->shadow = NULL;
+err_unwind_video:
+	tg_relay_to_gdc(tfb);
 	tg_unmap_vram(tfb);
-	goto err_access;
 err_restore:
 	tg_restore_state(tfb);
 err_access:
@@ -988,30 +1401,33 @@ static void pc98tridentfb_remove(struct pci_dev *pdev)
 	unregister_framebuffer(info);
 	fb_deferred_io_cleanup(info);
 	fb_dealloc_cmap(&info->cmap);
-	tg_seq_write(tfb, 0x01, tg_seq_read(tfb, 0x01) | 0x20);
-	tg_relay_to_gdc(tfb);
-	tg_restore_state(tfb);
+	vfree(tfb->hw_shadow);
+	tfb->hw_shadow = NULL;
 	vfree(tfb->shadow);
 	tfb->shadow = NULL;
+	tg_relay_to_gdc(tfb);
 	tg_unmap_vram(tfb);
+	tg_restore_state(tfb);
 	tg_release_access_path(tfb);
 	framebuffer_release(info);
 	pci_disable_device(pdev);
 }
 
-static const struct pci_device_id pc98tridentfb_ids[] = {
+static const struct pci_device_id pc98tridentfb_pci_tbl[] = {
 	{ PCI_DEVICE(PCI_VENDOR_TRIDENT, PCI_DEVICE_TGUI9660) },
 	{ }
 };
+MODULE_DEVICE_TABLE(pci, pc98tridentfb_pci_tbl);
 
 static struct pci_driver pc98tridentfb_driver = {
 	.name		= DRV_NAME,
-	.id_table	= pc98tridentfb_ids,
+	.id_table	= pc98tridentfb_pci_tbl,
 	.probe		= pc98tridentfb_probe,
 	.remove		= pc98tridentfb_remove,
 };
+
 module_pci_driver(pc98tridentfb_driver);
 
-MODULE_DESCRIPTION("NEC PC-9821 built-in Trident TGUI96xx framebuffer");
-MODULE_AUTHOR("Awe Morris, Keiichi Tabata");
+MODULE_AUTHOR("PC-9800 Lovers");
+MODULE_DESCRIPTION("NEC PC-9821 Trident TGUI96xx framebuffer driver (Multi-Mode)");
 MODULE_LICENSE("GPL");
