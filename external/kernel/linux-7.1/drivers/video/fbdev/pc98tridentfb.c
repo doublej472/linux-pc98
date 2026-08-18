@@ -718,6 +718,35 @@ static void set_vclk(struct pc98tridentfb *tfb, unsigned long freq_khz)
 	tg_write(tfb, TG_VCLK + 1, best_n);
 }
 
+/* Set memory clock (MCLK) frequency to boost internal VRAM bandwidth */
+static void set_mclk(struct pc98tridentfb *tfb, unsigned long freq_khz)
+{
+	int m, n, k;
+	unsigned long fi, d, di;
+	unsigned char best_m = 0, best_n = 0, best_k = 0;
+	unsigned char shift = 1;
+
+	d = 20000;
+	for (k = shift; k >= 0; k--) {
+		for (m = 1; m < 32; m++) {
+			n = ((m + 2) << shift) - 8;
+			for (n = (n < 0 ? 0 : n); n < 122; n++) {
+				fi = ((14318L * (n + 8)) / (m + 2)) >> k;
+				di = abs(fi - freq_khz);
+				if (di < d || (di == d && k == best_k)) {
+					d = di;
+					best_m = m;
+					best_n = n;
+					best_k = k;
+				}
+			}
+		}
+	}
+	tg_write(tfb, TG_VCLK - 2, 0x02);
+	tg_write(tfb, TG_VCLK, (best_m & 0x1f) | ((best_k & 3) << 5));
+	tg_write(tfb, TG_VCLK + 1, best_n);
+}
+
 /* 2D Hardware Acceleration Helpers */
 static void tgui_wait_engine(struct pc98tridentfb *tfb)
 {
@@ -904,6 +933,7 @@ static void tg_set_mode(struct pc98tridentfb *tfb, const struct tg_mode_entry *m
 	tg_seq_write(tfb, 0x0d, 0x00);
 
 	set_vclk(tfb, m->vclk_khz);
+	set_mclk(tfb, 60000); /* Program 60 MHz MCLK for 50ns/60ns EDO VRAM */
 	tg_misc_write(tfb, m->misc);
 	tg_crtc_write(tfb, 0x11, tg_crtc_read(tfb, 0x11) & 0x7f);
 	for (i = 0; i < ARRAY_SIZE(m->crtc); i++)
@@ -1219,11 +1249,22 @@ static void pc98tridentfb_fillrect(struct fb_info *info,
 				   const struct fb_fillrect *rect)
 {
 	struct pc98tridentfb *tfb = info->par;
+	const struct tg_mode_entry *m = tfb->current_mode ? tfb->current_mode : &tg_modes[0];
 
 	if (!noaccel && tfb->mmio && rect->rop == ROP_COPY) {
 		mutex_lock(&tfb->vram_lock);
 		tgui_fill_rect(tfb, rect->dx, rect->dy,
 			       rect->width, rect->height, rect->color);
+
+		/* Sync hw_shadow mirror so deferred IO does not re-push filled rect over PCI */
+		if (tfb->hw_shadow) {
+			u32 y;
+			for (y = rect->dy; y < rect->dy + rect->height && y < m->yres; y++) {
+				unsigned long offset = y * m->pitch + rect->dx;
+				if (rect->dx + rect->width <= m->xres)
+					memset(tfb->hw_shadow + offset, rect->color, rect->width);
+			}
+		}
 		mutex_unlock(&tfb->vram_lock);
 		sys_fillrect(info, rect);
 	} else {
@@ -1235,12 +1276,24 @@ static void pc98tridentfb_copyarea(struct fb_info *info,
 				   const struct fb_copyarea *area)
 {
 	struct pc98tridentfb *tfb = info->par;
+	const struct tg_mode_entry *m = tfb->current_mode ? tfb->current_mode : &tg_modes[0];
 
 	if (!noaccel && tfb->mmio) {
 		mutex_lock(&tfb->vram_lock);
 		tgui_copy_rect(tfb, area->sx, area->sy,
 			       area->dx, area->dy,
 			       area->width, area->height);
+
+		/* Sync hw_shadow mirror so deferred IO does not re-push copied area over PCI */
+		if (tfb->hw_shadow) {
+			u32 y;
+			for (y = 0; y < area->height && (area->dy + y) < m->yres; y++) {
+				unsigned long dst_off = (area->dy + y) * m->pitch + area->dx;
+				unsigned long src_off = (area->sy + y) * m->pitch + area->sx;
+				if (area->dx + area->width <= m->xres && area->sx + area->width <= m->xres)
+					memcpy(tfb->hw_shadow + dst_off, tfb->hw_shadow + src_off, area->width);
+			}
+		}
 		mutex_unlock(&tfb->vram_lock);
 		sys_copyarea(info, area);
 	} else {
@@ -1252,6 +1305,7 @@ static void pc98tridentfb_imageblit(struct fb_info *info,
 				    const struct fb_image *img)
 {
 	struct pc98tridentfb *tfb = info->par;
+	const struct tg_mode_entry *m = tfb->current_mode ? tfb->current_mode : &tg_modes[0];
 
 	if (!noaccel && tfb->mmio && img->depth == 1) {
 		u32 col = img->fg_color;
@@ -1262,6 +1316,13 @@ static void pc98tridentfb_imageblit(struct fb_info *info,
 				img->width, img->height, col, bgcol);
 		mutex_unlock(&tfb->vram_lock);
 		sys_imageblit(info, img);
+		if (tfb->hw_shadow && img->dx + img->width <= m->xres) {
+			u32 y;
+			for (y = 0; y < img->height && (img->dy + y) < m->yres; y++) {
+				unsigned long offset = (img->dy + y) * m->pitch + img->dx;
+				memcpy(tfb->hw_shadow + offset, tfb->shadow + offset, img->width);
+			}
+		}
 	} else {
 		sys_imageblit(info, img);
 	}
