@@ -59,3 +59,14 @@ if test "$run_update" -eq 1; then
 	"${privilege[@]}" apt-get update
 fi
 "${privilege[@]}" apt-get install "${apt_options[@]}" "${packages[@]}"
+
+# zig is not packaged by Debian; fetch the official tarball so
+# ./build.sh tools can cross-build the static i486 musl pc98snd player
+# (the host's 32-bit glibc/libstdc++ are SSE2-built and SIGILL on pre-SSE
+# PC-98 CPUs).
+if ! command -v zig >/dev/null 2>&1; then
+	zig_version="${ZIG_VERSION:-0.16.0}"
+	zig_url="https://ziglang.org/download/${zig_version}/zig-x86_64-linux-${zig_version}.tar.xz"
+	curl -fsSL "$zig_url" | "${privilege[@]}" tar -xJ -C /opt
+	"${privilege[@]}" ln -sf "/opt/zig-x86_64-linux-${zig_version}/zig" /usr/local/bin/zig
+fi

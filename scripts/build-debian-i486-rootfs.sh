@@ -39,11 +39,10 @@ test "${#packages[@]}" -gt 0 || {
 	echo "Debian package manifest is empty: $package_manifest" >&2
 	exit 1
 }
-x11_profile_packages=(xorg xserver-xorg-video-cirrus xterm twm)
+x11_profile_packages=(xorg xserver-xorg-video-fbdev xterm twm)
 x11_runtime_packages=(
 	xserver-xorg-core
 	xserver-xorg-input-evdev
-	xserver-xorg-video-cirrus
 	xserver-xorg-video-fbdev
 )
 excluded_wayland_packages=(
@@ -134,7 +133,7 @@ sudo cmp -s "$xinitrc" "$stage/root/.xinitrc" || {
 	echo "PC-98 X session startup file was not installed correctly" >&2
 	exit 1
 }
-test -x "$stage/root/.xinitrc" || {
+sudo test -x "$stage/root/.xinitrc" || {
 	echo "PC-98 X session startup file is not executable" >&2
 	exit 1
 }

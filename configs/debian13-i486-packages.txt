@@ -14,16 +14,28 @@ net-tools
 dhcpcd-base
 ca-certificates
 
-# Minimum interactive and network-recovery tools.
+# Core utilities, diagnostics, and interactive tools.
 vim-tiny
-iputils-ping
+vim
+tmux
+htop
+procps
+sysstat
+less
+curl
+eject
 wget
+kexec-tools
+iputils-ping
 openssh-server
 ucf
 runit-helper
 
-# Minimal X11 desktop used for PC-98 graphics validation.
+# Minimal X11 desktop used for PC-98 graphics validation.  The fbdev driver
+# renders onto /dev/fb0, which the pc98tridentfb kernel module exposes for the
+# on-board Trident TGUI96xx (or pc98cirrusfb on Cirrus-based models).
 xorg
-xserver-xorg-video-cirrus
+xserver-xorg-video-fbdev
+xserver-xorg-input-evdev
 xterm
 twm
