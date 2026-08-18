@@ -149,6 +149,63 @@ static void test_clock_precision(void)
 	TEST_ASSERT(elapsed_us >= 8000 && elapsed_us <= 25000, "10ms delay must measure ~10,000 us without drift");
 }
 
+static void test_cdg_sprite_parser(void)
+{
+	printf("[*] Testing CDG 5-Bitplane Sprite Sheet Parser...\n");
+
+	/* Create a 16x16 CDG buffer in memory (16 header bytes + 5 * 32 plane bytes) */
+	uint8_t cdg_raw[16 + 5 * 32];
+	memset(cdg_raw, 0, sizeof(cdg_raw));
+
+	cdg_raw[0] = 32; cdg_raw[1] = 0;   /* bitplane_size = 32 */
+	cdg_raw[2] = 16; cdg_raw[3] = 0;   /* pixel_w = 16 */
+	cdg_raw[4] = 16; cdg_raw[5] = 0;   /* pixel_h = 16 */
+	cdg_raw[10] = 1;                   /* image_count = 1 */
+	cdg_raw[11] = 1;                   /* plane_layout = 1 (Colors + Alpha) */
+
+	/* Fill Alpha mask (Plane 0) with 0xFF (opaque) */
+	memset(cdg_raw + 16, 0xFF, 32);
+	/* Fill Plane B with 0xAA */
+	memset(cdg_raw + 16 + 32, 0xAA, 32);
+
+	pc98_cdg_t cdg;
+	int rc = pc98_cdg_load_from_memory(cdg_raw, sizeof(cdg_raw), &cdg);
+	TEST_ASSERT(rc == 0, "pc98_cdg_load_from_memory must return 0 on valid CDG");
+	TEST_ASSERT(cdg.pixel_w == 16, "CDG pixel_w must be 16");
+	TEST_ASSERT(cdg.pixel_h == 16, "CDG pixel_h must be 16");
+	TEST_ASSERT(cdg.alpha_plane != NULL, "CDG alpha_plane must be allocated");
+	TEST_ASSERT(cdg.planes[0][0] == 0xAA, "CDG Plane B must match input pattern 0xAA");
+
+	pc98_cdg_free(&cdg);
+	TEST_ASSERT(cdg.alpha_plane == NULL, "pc98_cdg_free must deallocate alpha_plane");
+}
+
+static void test_pi_image_decoder(void)
+{
+	printf("[*] Testing PI 16-Color Yanagisawa Image Decoder...\n");
+
+	/* Create a 640x400 PI image buffer (60 header bytes + 4 * 32KB planes) */
+	size_t pi_size = 60 + 4 * 32000;
+	uint8_t *pi_raw = (uint8_t *)calloc(1, pi_size);
+
+	pi_raw[8] = 0x80; pi_raw[9] = 0x02;  /* width = 640 */
+	pi_raw[10] = 0x90; pi_raw[11] = 0x01; /* height = 400 */
+
+	/* Set color 1 palette to (15, 0, 0) = Red */
+	pi_raw[12 + 3] = 15; pi_raw[12 + 4] = 0; pi_raw[12 + 5] = 0;
+
+	pc98_pi_image_t pi;
+	int rc = pc98_pi_load_from_memory(pi_raw, pi_size, &pi);
+	TEST_ASSERT(rc == 0, "pc98_pi_load_from_memory must return 0 on valid PI");
+	TEST_ASSERT(pi.width == 640, "PI width must be 640");
+	TEST_ASSERT(pi.height == 400, "PI height must be 400");
+	TEST_ASSERT(pi.palette[3] == 15, "PI palette color 1 Red component must be 15");
+
+	pc98_pi_free(&pi);
+	TEST_ASSERT(pi.planes[0] == NULL, "pc98_pi_free must deallocate planes");
+	free(pi_raw);
+}
+
 int main(void)
 {
 	printf("=========================================\n");
@@ -159,6 +216,8 @@ int main(void)
 	test_planar_chunky_conversion();
 	test_egc_operations();
 	test_clock_precision();
+	test_cdg_sprite_parser();
+	test_pi_image_decoder();
 
 	printf("=========================================\n");
 	printf("Test Results: %d Passed, %d Failed\n", g_tests_passed, g_tests_failed);

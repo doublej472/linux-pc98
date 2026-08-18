@@ -509,6 +509,7 @@ typedef struct {
 
 static inline pc98_dat_t *pc98_dat_open(const char *game_subpath, const char *dat_name)
 {
+	const char *sub = game_subpath ? game_subpath : "";
 	static const char *search_dirs[] = {
 		".",
 		"./assets",
@@ -527,7 +528,7 @@ static inline pc98_dat_t *pc98_dat_open(const char *game_subpath, const char *da
 
 	for (int i = 0; search_dirs[i] != NULL; i++) {
 		char dir[256];
-		snprintf(dir, sizeof(dir), search_dirs[i], game_subpath);
+		snprintf(dir, sizeof(dir), search_dirs[i], sub);
 		snprintf(full_path, sizeof(full_path), "%s/%s", dir, dat_name);
 
 		fp = fopen(full_path, "rb");
@@ -607,6 +608,8 @@ static inline uint8_t *pc98_dat_read_file(pc98_dat_t *dat, const char *entry_nam
 	if (found_idx < 0) return NULL;
 
 	pc98_dat_entry_t *entry = &dat->entries[found_idx];
+	if (entry->packsize == 0 || entry->orgsize == 0) return NULL;
+
 	fseek(dat->fp, (long)entry->offset, SEEK_SET);
 
 	uint8_t *packed = (uint8_t *)malloc(entry->packsize + 64);
@@ -714,6 +717,10 @@ static inline int pc98_cdg_load_from_memory(const uint8_t *buf, size_t size, pc9
 			memcpy(cdg->planes[i], src, plane_bytes); src += plane_bytes;
 		}
 	} else {
+		if (cdg->alpha_plane) { free(cdg->alpha_plane); cdg->alpha_plane = NULL; }
+		for (int i = 0; i < 4; i++) {
+			if (cdg->planes[i]) { free(cdg->planes[i]); cdg->planes[i] = NULL; }
+		}
 		return -1;
 	}
 

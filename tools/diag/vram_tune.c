@@ -187,8 +187,8 @@ int main(int argc, char **argv)
 	printf("  PC-9821 Trident TGUI96xx VRAM Auto-Tuning & Stress Test Suite   \n");
 	printf("==================================================================\n");
 
-	if (ioperm(0x3c0, 0x40, 1) != 0 || ioperm(0x43c0, 0x10, 1) != 0) {
-		fprintf(stderr, "Root privileges required for direct hardware I/O access (ioperm failed: %s)\n",
+	if (iopl(3) != 0) {
+		fprintf(stderr, "Root privileges required for direct hardware I/O access (iopl failed: %s)\n",
 		        strerror(errno));
 		return 1;
 	}
