@@ -5,6 +5,18 @@
 # musl source trees (for the soft-float build) from this repository instead
 # of its own vendor/ submodules.
 zedbsd="$repo/external/zedBSD"
+
+# zedBSD itself vendors submodules; its Noct source tree is always required,
+# while its GCC/musl/firmware trees are overridden by this repository's own
+# submodules (ZEDBSD_GCC_ROOT / ZEDBSD_MUSL_ROOT below), so only the Noct
+# tree is initialized here.  The check is idempotent so an existing checkout
+# is left untouched.
+noct_upstream="$zedbsd/userland/noct/noct-upstream"
+if [ ! -e "$noct_upstream/src/api/beui-core.c" ] && [ -e "$zedbsd/.git" ]; then
+	echo "Initializing zedBSD Noct submodule (userland/noct/noct-upstream)..." >&2
+	git -C "$zedbsd" submodule update --init --recursive \
+		userland/noct/noct-upstream
+fi
 export QEMU="${QEMU:-$repo/external/qemu-pc98/build/qemu-system-i386}"
 export PC98_BIOS_DIR="${PC98_BIOS_DIR:-$repo/external/qemu-pc98/roms/pc98bios}"
 export ZEDBSD_RELEASES_DIR="${ZEDBSD_RELEASES_DIR:-$repo/build/releases}"

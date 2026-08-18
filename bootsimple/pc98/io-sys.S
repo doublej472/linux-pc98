@@ -508,10 +508,14 @@ elf_copy_next:
 	movw	$BOUNCE_SEG, %ax
 	movw	%ax, %es
 	xorw	%bp, %bp
-	call	stream_read_sector
+	call	stream_read_chunk
 	jc	loader_failure
-	addl	$512, elf_stream_pos
-	movl	$512, %edx
+
+	movzwl	chunk_sectors_read, %eax
+	shll	$9, %eax
+	addl	%eax, elf_stream_pos
+
+	movl	%eax, %edx
 	cmpl	%edx, remaining
 	jae	elf_copy_size_ready
 	movl	remaining, %edx
@@ -545,8 +549,10 @@ elf_copy_account:
 	addl	%edx, cur_dest
 	subl	%edx, remaining
 	addl	%edx, loaded_bytes
-	incw	progress_sectors
-	testb	$0xff, progress_sectors
+	movw	progress_sectors, %ax
+	addw	chunk_sectors_read, %ax
+	movw	%ax, progress_sectors
+	testb	$0x80, %al
 	jnz	elf_copy_next
 	call	update_transfer_display
 	jmp	elf_copy_next
@@ -1216,8 +1222,76 @@ chs_to_lba:
 	addl	%ecx, %eax
 	ret
 
+/* Read up to a cluster (max 32 sectors / 16 KB) from FAT stream to ES:0. */
+stream_read_chunk:
+	movzwl	current_cluster, %eax
+	cmpl	$2, %eax
+	jb	9f
+	cmpl	$0xfff8, %eax
+	jae	9f
+
+	/* Sectors remaining in this cluster */
+	movzbl	sectors_per_cluster, %ecx
+	movzbl	sector_in_cluster, %edx
+	subl	%edx, %ecx
+
+	/* Sectors needed for remaining segment bytes */
+	movl	remaining, %eax
+	addl	$511, %eax
+	shrl	$9, %eax
+	testl	%eax, %eax
+	jz	9f
+	cmpl	%eax, %ecx
+	jbe	1f
+	movl	%eax, %ecx
+1:
+	/* Cap chunk to 32 sectors (16 KB) for bounce buffer */
+	cmpl	$32, %ecx
+	jbe	2f
+	movl	$32, %ecx
+2:
+	movw	%cx, chunk_sectors_read
+
+	/* Physical LBA = data_lba + (cluster - 2)*spc + sector_in_cluster */
+	movzwl	current_cluster, %eax
+	subl	$2, %eax
+	movzbl	sectors_per_cluster, %edx
+	imull	%edx, %eax
+	movzbl	sector_in_cluster, %edx
+	addl	%edx, %eax
+	addl	data_lba, %eax
+
+	/* Byte count to read = chunk_sectors_read * 512 */
+	movzwl	chunk_sectors_read, %ebx
+	shll	$9, %ebx
+	call	read_disk
+	jc	9f
+
+	/* Advance sector_in_cluster */
+	movzbl	sector_in_cluster, %eax
+	addw	chunk_sectors_read, %ax
+	movb	%al, sector_in_cluster
+	cmpb	sectors_per_cluster, %al
+	jb	8f
+	movb	$0, sector_in_cluster
+	movw	current_cluster, %ax
+	call	fat_next
+	cmpw	$0xfff8, %ax
+	jb	7f
+	movw	$0xffff, current_cluster
+	jmp	8f
+7:
+	movw	%ax, current_cluster
+8:
+	clc
+	ret
+9:
+	stc
+	ret
+
 /* Read the next 512-byte file sector to ES:BP and advance the FAT stream. */
 stream_read_sector:
+	movw	$1, chunk_sectors_read
 	movzwl	current_cluster, %eax
 	cmpl	$2, %eax
 	jb	9f
@@ -1297,7 +1371,7 @@ read_disk:
 	pushw	%es
 	pushw	%bp
 
-	/* BX is a byte count; issue conservative one-sector INT 1Bh reads. */
+	/* BX is a byte count; read up to full track chunks via INT 1Bh. */
 	testw	%bx, %bx
 	jz	9f
 	testw	$511, %bx
@@ -1327,6 +1401,26 @@ read_disk:
 	movzbl	%cs:bios_sectors, %ebx
 	divl	%ebx
 	movb	%al, %dh
+
+	/* Calculate remaining sectors on this track: bios_sectors - DL */
+	movzbl	%cs:bios_sectors, %ecx
+	movzbl	%dl, %eax
+	subw	%ax, %cx
+
+	/* Cap to pio_count */
+	cmpw	%cs:pio_count, %cx
+	jbe	2f
+	movw	%cs:pio_count, %cx
+2:
+	/* Cap to 32 sectors (16 KB) per INT 1Bh call */
+	cmpw	$32, %cx
+	jbe	3f
+	movw	$32, %cx
+3:
+	movw	%cx, %cs:pio_chunk_sectors
+	shlw	$9, %cx			/* Byte count = chunk_sectors * 512 */
+	movw	%cx, %bx
+
 	movw	%cs:pio_cylinder, %cx
 	movw	%cs:pio_segment, %ax
 	movw	%ax, %es
@@ -1335,15 +1429,18 @@ read_disk:
 	movw	%ax, %ds
 	movb	%cs:boot_drive, %al
 	orb	$0x80, %al
-	movb	$0x06, %ah
-	movw	$512, %bx
+	movb	$0x06, %ah		/* AH=06h: Read sectors */
 	movw	%cs:bios_si, %si
 	movw	%cs:bios_di, %di
 	int	$0x1b
 	jc	9f
-	incl	%cs:pio_lba
-	addw	$512, %cs:pio_offset
-	decw	%cs:pio_count
+
+	/* Advance LBA and offset by chunk_sectors */
+	movzwl	%cs:pio_chunk_sectors, %eax
+	addl	%eax, %cs:pio_lba
+	subw	%ax, %cs:pio_count
+	shlw	$9, %ax
+	addw	%ax, %cs:pio_offset
 	jmp	1b
 
 8:
@@ -1428,12 +1525,16 @@ sector_in_cluster:
 	.byte	0
 progress_sectors:
 	.word	0
+chunk_sectors_read:
+	.word	0
 seek_progress_sectors:
 	.word	0
 	.balign 4
 pio_lba:
 	.long	0
 pio_count:
+	.word	0
+pio_chunk_sectors:
 	.word	0
 pio_cylinder:
 	.word	0

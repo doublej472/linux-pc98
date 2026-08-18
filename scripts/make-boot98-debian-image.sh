@@ -61,14 +61,20 @@ esac
 # The FAT16 PBR occupies one 1024-byte reserved sector and IO.SYS is the first
 # ordinary FAT file, so DOS and the partition IPL use the same start CHS.
 # Keep the root byte capacity, use a 128 MiB FAT16 BOOT partition, and round
-# each one up to whole cylinders for the selected geometry.  Fixed
-# ending cylinder numbers would make an H=8/S=32 SCSI image about 1.88 times
-# larger than the IDE image even though both contain the same files.
+# each one up to whole cylinders for the selected geometry.  Fixed ending
+# cylinder numbers would make an H=8/S=32 SCSI image about 1.88 times larger
+# than the IDE image even though both contain the same files.  Only the
+# SCSI-92 profile (H=8/S=32) gets a larger 1 GiB root; every other profile
+# keeps the default capacity.
 cylinder_sectors=$((heads * sectors))
 cylinder_bytes=$((cylinder_sectors * 512))
 baseline_cylinder_bytes=$((8 * 17 * 512))
 boot_target_bytes=$((128 * 1024 * 1024))
-root_target_bytes=$((13371 * baseline_cylinder_bytes))
+if [ "$heads:$sectors" = "8:32" ]; then
+	root_target_bytes=$((1024 * 1024 * 1024))
+else
+	root_target_bytes=$((13371 * baseline_cylinder_bytes))
+fi
 
 boot_start_cylinder=1
 boot_cylinders=$(((boot_target_bytes + cylinder_bytes - 1) / cylinder_bytes))
@@ -166,7 +172,7 @@ if test "$bootloader" = zedbsd; then
 	printf '%s\n' \
 		'echo Booting Debian 13 i486...' \
 		'kernel VMLINUX' \
-		"arg root=PARTLABEL=DEBIAN13 rootfstype=ext4 rw rootwait${kernel_extra_args:+ $kernel_extra_args}" \
+		"arg root=PARTLABEL=DEBIAN13 rootfstype=ext4 rw rootwait pnpbios=off${kernel_extra_args:+ $kernel_extra_args}" \
 		'boot' >"$cfg"
 fi
 
@@ -187,11 +193,11 @@ sudo tee "$mount_dir/usr/local/sbin/pc98-direct-shell" >/dev/null <<'EOF'
 HOME=/root
 USER=root
 LOGNAME=root
-SHELL=/bin/sh
+SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export HOME USER LOGNAME SHELL PATH
 cd /root || cd /
-exec /bin/sh
+exec /bin/bash -l
 EOF
 sudo chmod 0755 "$mount_dir/usr/local/sbin/pc98-direct-shell"
 sudo sed -i '/^[1-6]:[0-9]*:respawn:\/sbin\/getty /d' \
@@ -204,11 +210,43 @@ printf '%s\n' \
 # avoid its full early-device trigger on this memory-constrained live image.
 sudo rm -f "$mount_dir/etc/rcS.d/S02udev"
 printf '%s\n' \
-	'/dev/sda2 / ext4 defaults,noatime 0 1' \
-	'/dev/sda3 none swap sw 0 0' \
+	'/dev/root / ext4 defaults,noatime 0 0' \
+	'LABEL=PC98SWAP none swap sw 0 0' \
 	'proc /proc proc defaults 0 0' \
 	'sysfs /sys sysfs defaults 0 0' | \
 	sudo tee "$mount_dir/etc/fstab" >/dev/null
+
+# sysvinit auto-loads the modules listed in /etc/modules (read by kmod's
+# init script).  pc98snd drives the PC-9801-86 sound card; pc98busmouse is
+# the built-in bus mouse (0x7fd9, IRQ 13); snd-mpu401 is the Roland
+# MPU-PC98II MIDI card.  A missing module is skipped by modprobe with only
+# a warning, so an unstaged entry cannot break boot.
+printf '%s\n' \
+	'# pc98tridentfb framebuffer (for X11) is loaded manually before startx:' \
+	'# its shadow/verify path is CPU-heavy on the single-core Celeron.' \
+	'pc98busmouse' \
+	'pc98snd' \
+	'snd-mpu401' | \
+	sudo tee "$mount_dir/etc/modules" >/dev/null
+
+# Xorg configuration for PC-98 framebuffer / evdev input
+sudo install -D -m 0644 "$repo/configs/xorg/20-pc98-coregraph.conf" \
+	"$mount_dir/etc/X11/xorg.conf.d/20-pc98-coregraph.conf"
+
+# SSH configuration: allow root login with password
+sudo mkdir -p "$mount_dir/etc/ssh/sshd_config.d"
+printf '%s\n' 'PermitRootLogin yes' | \
+	sudo tee "$mount_dir/etc/ssh/sshd_config.d/permit-root-login.conf" >/dev/null
+
+# Roland MPU-PC98II MIDI card (data 0xE0D0, status/command 0xE0D2).
+# TODO(irq): reassign the card's DIP switch to INT1/IRQ5 and change
+# irq=-1 to irq=5.  Polling (irq=-1) is used for now because the factory
+# IRQ 6 is held by the am53c974 SCSI card.
+# Set pnp=0 so the driver does not skip manual C-Bus probing on CONFIG_PNP kernels.
+sudo mkdir -p "$mount_dir/etc/modprobe.d"
+printf '%s\n' \
+	'options snd-mpu401 port=0xe0d0 irq=-1 hardware=18 pnp=0' | \
+	sudo tee "$mount_dir/etc/modprobe.d/mpu401.conf" >/dev/null
 printf '%s\n' 'debian-pc98' | \
 	sudo tee "$mount_dir/etc/hostname" >/dev/null
 printf '%s\n' \
@@ -217,18 +255,155 @@ printf '%s\n' \
 	sudo tee "$mount_dir/etc/hosts" >/dev/null
 printf '%s\n' \
 	'auto lo' \
-	'iface lo inet loopback' | \
+	'iface lo inet loopback' \
+	'' \
+	'allow-hotplug eth0' \
+	'iface eth0 inet dhcp' | \
 	sudo tee "$mount_dir/etc/network/interfaces" >/dev/null
-printf '%s\n' 'CONFIGURE_INTERFACES=no' | \
-	sudo tee "$mount_dir/etc/default/networking" >/dev/null
+
+# DHCP client for any present NIC (ifupdown above only manages lo).  Do not
+# assume a network card or a reachable DHCP server exists: dhcpcd is started
+# in the background and simply idles until an interface appears, so a
+# machine with no NIC (or no internet access) still boots promptly and never
+# blocks on the network.
+sudo tee "$mount_dir/etc/init.d/dhcpcd" >/dev/null <<'EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          dhcpcd
+# Required-Start:    $network $local_fs $remote_fs
+# Required-Stop:     $network $local_fs $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: DHCP client for all interfaces
+### END INIT INFO
+
+DAEMON=/usr/sbin/dhcpcd
+
+test -x "$DAEMON" || exit 0
+
+case "$1" in
+  start)
+	# Administratively bring up ethernet interfaces so PHYs power on and detect carrier
+	for dev in /sys/class/net/*; do
+		name="$(basename "$dev")"
+		if [ "$name" != "lo" ] && [ -d "$dev" ]; then
+			ip link set "$name" up 2>/dev/null || true
+		fi
+	done
+	start-stop-daemon --start --quiet --oknodo --background \
+		--exec "$DAEMON" -- -q -b
+	;;
+  stop)
+	start-stop-daemon --stop --quiet --oknodo --exec "$DAEMON"
+	;;
+  restart|force-reload)
+	"$0" stop
+	"$0" start
+	;;
+  status)
+	if pgrep -x dhcpcd >/dev/null 2>&1 || pgrep -f "dhcpcd: \[manager\]" >/dev/null 2>&1; then
+		echo "dhcpcd is running"
+		exit 0
+	else
+		echo "dhcpcd is not running"
+		exit 3
+	fi
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart|force-reload|status}" >&2
+	exit 1
+	;;
+esac
+
+exit 0
+EOF
+sudo chmod 0755 "$mount_dir/etc/init.d/dhcpcd"
+sudo chroot "$mount_dir" /bin/sh -c 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /usr/sbin/update-rc.d dhcpcd defaults'
+
+# Time synchronization service: runs in the background and syncs the clock
+# as soon as networking becomes available, without blocking offline boot.
+sudo tee "$mount_dir/etc/init.d/pc98-timesync" >/dev/null <<'EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          pc98-timesync
+# Required-Start:    $network $local_fs $remote_fs
+# Required-Stop:     $network $local_fs $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Non-blocking NTP time synchronization
+### END INIT INFO
+
+DAEMON=/usr/sbin/pc98-timesync
+
+test -x "$DAEMON" || exit 0
+
+case "$1" in
+  start)
+	start-stop-daemon --start --quiet --oknodo --background \
+		--exec "$DAEMON" -- --daemon
+	;;
+  stop)
+	start-stop-daemon --stop --quiet --oknodo --exec "$DAEMON"
+	;;
+  restart|force-reload)
+	"$0" stop
+	"$0" start
+	;;
+  status)
+	if pgrep -x pc98-timesync >/dev/null 2>&1; then
+		echo "pc98-timesync is running"
+		exit 0
+	else
+		echo "pc98-timesync is not running"
+		exit 3
+	fi
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart|force-reload|status}" >&2
+	exit 1
+	;;
+esac
+
+exit 0
+EOF
+sudo chmod 0755 "$mount_dir/etc/init.d/pc98-timesync"
+sudo chroot "$mount_dir" /bin/sh -c 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /usr/sbin/update-rc.d pc98-timesync defaults'
 printf '%s\n' \
-	'deb [trusted=yes arch=i386] https://noctvm.io/debian-i486/packages trixie main pc98' | \
+	'deb [trusted=yes arch=i386] https://noctvm.io/debian-i486/packages trixie main pc98' \
+	'deb [trusted=yes arch=i386] http://deb.debian.org/debian trixie main' | \
 	sudo tee "$mount_dir/etc/apt/sources.list" >/dev/null
 printf '%s\n' \
 	'Debian GNU/Linux 13 (trixie) i486 PC-98 BOOT98 image' \
 	"Login: root  Password: $root_password" | \
 	sudo tee "$mount_dir/etc/motd" >/dev/null
-printf 'root:%s\n' "$root_password" | sudo chroot "$mount_dir" chpasswd
+printf 'root:%s\n' "$root_password" | sudo chroot "$mount_dir" /usr/sbin/chpasswd
+sudo chroot "$mount_dir" /usr/sbin/usermod -s /bin/bash root 2>/dev/null || true
+
+# Install kernel image and kexec fast-reboot tool
+sudo mkdir -p "$mount_dir/boot"
+sudo install -m 0644 "$kernel" "$mount_dir/boot/vmlinux.boot"
+sudo ln -sf vmlinux.boot "$mount_dir/boot/vmlinux"
+
+sudo tee "$mount_dir/usr/sbin/pc98-kexec" >/dev/null <<'EOF'
+#!/bin/sh
+set -e
+KERNEL="${1:-/boot/vmlinux.boot}"
+CMDLINE="${2:-$(cat /proc/cmdline)}"
+
+if [ ! -f "$KERNEL" ]; then
+	echo "Kernel image not found: $KERNEL" >&2
+	exit 1
+fi
+
+echo "Loading kernel for kexec: $KERNEL"
+echo "Kernel command line: $CMDLINE"
+kexec -l "$KERNEL" --command-line="$CMDLINE"
+
+echo "Executing kexec fast reboot..."
+kexec -e
+EOF
+sudo chmod 0755 "$mount_dir/usr/sbin/pc98-kexec"
+
 sudo chroot "$mount_dir" apt-get clean
 sudo sync
 sudo umount "$mount_dir"
@@ -259,9 +434,17 @@ case "$bootloader" in
 		;;
 esac
 
+# The BlueSCSI reports a SCSI Medium Error when it reads a sparse hole
+# in the SD-card image (the dd steps use conv=sparse and truncate leaves
+# holes), so materialize the file: copy without reflink and without sparse
+# output, writing zeros to every hole.
+materialized="$output.full"
+cp --sparse=never --reflink=never "$output" "$materialized"
+mv "$materialized" "$output"
+
 sha256sum "$output"
 printf 'BOOT98 Debian 13 i486 image: %s\n' "$output"
-printf 'Geometry: C=%d H=%d S=%d, root=/dev/sda2, swap=/dev/sda3 (%d MiB)\n' \
+printf 'Geometry: C=%d H=%d S=%d, root=PARTLABEL=DEBIAN13, swap=LABEL=PC98SWAP (%d MiB)\n' \
 	"$total_cylinders" "$heads" "$sectors" "$swap_mb"
 printf 'Partition bytes: BOOT=%d, root=%d, swap=%d\n' \
 	"$((boot_sectors * 512))" "$root_bytes" "$swap_bytes"

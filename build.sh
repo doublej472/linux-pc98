@@ -46,6 +46,7 @@ Primary commands:
   boot-install [options]      destructively create a BOOT partition environment
   dos-loader                  rebuild LINUX98.EXE and INST.EXE (OpenWatcom)
   kernel [options]            configure and build Linux 7.2
+  tools [options]             build pc98snd (player + kernel module)
   rootfs PROFILE              build a root filesystem
   rootfs-cache COMMAND        fetch/store/publish reusable rootfs archives
   image PROFILE [options]     create or update a named disk-image variant
@@ -271,6 +272,7 @@ case "$command" in
 		make -C "$zedbsd/platform/pc98/dos" "$@"
 		;;
 	kernel) build_kernel "$@" ;;
+	tools) "$repo/scripts/build-tools.sh" "$@" ;;
 	rootfs) build_rootfs "$@" ;;
 	rootfs-cache) "$repo/scripts/rootfs-cache.sh" "$@" ;;
 	image) "$repo/scripts/build-image.sh" "$@" ;;

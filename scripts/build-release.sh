@@ -151,6 +151,9 @@ echo "Building the shared Debian/i486 kernel and modules"
 ROOT_STAGE="$debian_root" INSTALL_MODULES=1 \
 	"$repo/build.sh" kernel --cpu 486 --profile pc98 \
 	--output-dir "$repo/build/kernel-7.2-i486" --jobs "$jobs"
+echo "Building and staging the PC-9801-86 sound support (pc98snd)"
+ROOT_STAGE="$debian_root" KERNEL_BUILD="$repo/build/kernel-7.2-i486" \
+	"$repo/build.sh" tools
 "$repo/build.sh" rootfs-cache store "$busybox_cache" "$busybox_root" >/dev/null
 "$repo/build.sh" rootfs-cache store "$debian_cache" "$debian_root" >/dev/null
 if test "$publish_rootfs" -eq 1; then

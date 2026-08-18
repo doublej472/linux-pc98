@@ -343,6 +343,12 @@ def make_ext4(image, start_lba, total_sectors, root_stage, small):
                 "^64bit,^resize_inode,^orphan_file,^huge_file,"
                 "^dir_nlink,^flex_bg",
             ]
+        else:
+            # mke2fs -d populates the tree but leaves the orphan_file feature
+            # corrupt (its size is set to the whole filesystem), so the mount
+            # fails with EUCLEAN.  Disable the feature; it is only an
+            # optimization for orphan tracking.
+            command += ["-O", "^orphan_file"]
         command += [
             "-E", "lazy_itable_init=0,lazy_journal_init=0",
             "-d", root_stage, root_image,
@@ -437,6 +443,16 @@ def create(args):
                 image, chs_lba(p3_start_cyl),
                 p3_cylinders * CYL_SECTORS)
         image.truncate(total_sectors * SECTOR_SIZE)
+
+    # The BlueSCSI reports a SCSI Medium Error when it reads a sparse hole
+    # in the SD-card image, so materialize the file: copy without reflink
+    # and without sparse output, writing zeros to every hole.
+    materialized = args.output + ".full"
+    subprocess.run(
+        ["cp", "--sparse=never", "--reflink=never",
+         args.output, materialized],
+        check=True)
+    os.replace(materialized, args.output)
 
     validate_image(args.output)
 

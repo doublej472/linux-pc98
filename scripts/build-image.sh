@@ -172,7 +172,7 @@ case "$profile" in
 		image_bootloader=bootsimple
 		sectors=32
 		root_device=PARTLABEL=DEBIAN13
-		kernel_extra_args="rootwait pc9801_scsi=92,mode=dma"
+		kernel_extra_args="rootwait pnpbios=off"
 		default_rootfs="$repo/build/boot98/debian13-i486-root"
 		default_kernel="$repo/build/kernel-7.2-i486/vmlinux.boot"
 		;;
