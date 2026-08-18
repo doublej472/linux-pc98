@@ -1,0 +1,11 @@
+bin/*
+obj/
+.tup/*
+tup.config
+tup-generate.vardict
+!bin/README.md
+!bin/masters.lib
+
+# Converted sprites
+*.[ac]sp
+*.[AC]SP
