@@ -26,6 +26,7 @@ static bool pnp[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
 #endif
 static long port[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;	/* MPU-401 port number */
 static int irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;	/* MPU-401 IRQ */
+static int hardware[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = MPU401_HW_MPU401};
 static bool uart_enter[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
 
 module_param_array(index, int, NULL, 0444);
@@ -42,6 +43,8 @@ module_param_hw_array(port, long, ioport, NULL, 0444);
 MODULE_PARM_DESC(port, "Port # for MPU-401 device.");
 module_param_hw_array(irq, int, irq, NULL, 0444);
 MODULE_PARM_DESC(irq, "IRQ # for MPU-401 device.");
+module_param_array(hardware, int, NULL, 0444);
+MODULE_PARM_DESC(hardware, "Hardware type (18 = Roland MPU-PC98II).");
 module_param_array(uart_enter, bool, NULL, 0444);
 MODULE_PARM_DESC(uart_enter, "Issue UART_ENTER command at open.");
 
@@ -72,7 +75,7 @@ static int snd_mpu401_create(struct device *devptr, int dev,
 		strcat(card->longname, "polled");
 	}
 
-	err = snd_mpu401_uart_new(card, 0, MPU401_HW_MPU401, port[dev], 0,
+	err = snd_mpu401_uart_new(card, 0, hardware[dev], port[dev], 0,
 				  irq[dev], NULL);
 	if (err < 0) {
 		dev_err(devptr, "MPU401 not detected at 0x%lx\n", port[dev]);
