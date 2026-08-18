@@ -1326,9 +1326,11 @@ static int pc98tridentfb_ioctl(struct fb_info *info, unsigned int cmd, unsigned 
 	struct pc98tridentfb *tfb = info->par;
 
 	if (cmd == FBIO_WAITFORVSYNC) {
-		while (tg_read(tfb, tfb->status) & 0x08)
+		unsigned int count = 200000;
+		while ((tg_read(tfb, tfb->status) & 0x08) && --count)
 			cpu_relax();
-		while (!(tg_read(tfb, tfb->status) & 0x08))
+		count = 200000;
+		while (!(tg_read(tfb, tfb->status) & 0x08) && --count)
 			cpu_relax();
 		return 0;
 	}
@@ -1385,7 +1387,23 @@ static int pc98tridentfb_probe(struct pci_dev *pdev,
 		return ret;
 
 	pci_set_master(pdev);
-	pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 64);
+	pci_try_set_mwi(pdev);
+	pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 128);
+
+	/* Enable Fast Back-to-Back PCI transactions */
+	{
+		u16 pci_cmd;
+		pci_read_config_word(pdev, PCI_COMMAND, &pci_cmd);
+		pci_cmd |= PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER | PCI_COMMAND_FAST_BACK;
+		pci_write_config_word(pdev, PCI_COMMAND, pci_cmd);
+	}
+
+	/* Optimize Trident PCI Master Control (Offset 0x40) */
+	{
+		u8 pci_ctrl;
+		pci_read_config_byte(pdev, 0x40, &pci_ctrl);
+		pci_write_config_byte(pdev, 0x40, pci_ctrl | 0x07);
+	}
 
 	info = framebuffer_alloc(sizeof(*tfb), &pdev->dev);
 	if (!info) {
