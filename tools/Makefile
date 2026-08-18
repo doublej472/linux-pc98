@@ -19,6 +19,7 @@ DEMO    := $(OUT)/pc98-demo-game
 TEST_SUITE := $(OUT)/test_libpc98
 BENCH   := $(OUT)/pc98-benchmark
 TRIDENT_BENCH := $(OUT)/pc98-trident-bench
+VRAM_TUNE := $(OUT)/pc98-vram-tune
 
 SEQ    := pmdmini/src/pmdwin
 YM     := pmdmini/src/ymfm
@@ -48,7 +49,7 @@ OBJS := \
 	$(BUILD)/file_fmgen.o \
 	$(BUILD)/sjis2utf.o
 
-all: $(TARGET) $(TIMESYNC) $(DEMO) $(TEST_SUITE) $(BENCH) $(TRIDENT_BENCH)
+all: $(TARGET) $(TIMESYNC) $(DEMO) $(TEST_SUITE) $(BENCH) $(TRIDENT_BENCH) $(VRAM_TUNE)
 
 $(TARGET): $(OBJS)
 	mkdir -p $(OUT)
@@ -73,6 +74,10 @@ $(BENCH): bench.c $(BUILD)/opna.o $(BUILD)/opna_hw_c.o
 $(TRIDENT_BENCH): diag/trident_bench.c
 	mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ diag/trident_bench.c
+
+$(VRAM_TUNE): diag/vram_tune.c
+	mkdir -p $(OUT)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ diag/vram_tune.c
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -120,6 +125,6 @@ $(BUILD)/sjis2utf.o: $(YM)/sjis2utf.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c -o $@ $<
 
 clean:
-	rm -rf $(BUILD) $(TARGET) $(TIMESYNC) $(DEMO) $(TEST_SUITE) $(BENCH) $(TRIDENT_BENCH)
+	rm -rf $(BUILD) $(TARGET) $(TIMESYNC) $(DEMO) $(TEST_SUITE) $(BENCH) $(TRIDENT_BENCH) $(VRAM_TUNE)
 
 .PHONY: all clean
