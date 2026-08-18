@@ -823,6 +823,30 @@ static void tgui_image_blit(struct pc98tridentfb *tfb, const char *data,
 	iowrite32_rep(tfb->regs + 0x2100, data, size);
 }
 
+static inline void tgui_draw_line(struct pc98tridentfb *tfb,
+				  u32 x1, u32 y1, u32 x2, u32 y2, u32 color)
+{
+	int dx = (int)x2 - (int)x1;
+	int dy = (int)y2 - (int)y1;
+	int ax = abs(dx);
+	int ay = abs(dy);
+	int flags = 0;
+
+	if (!tfb->mmio)
+		return;
+
+	if (dx < 0) flags |= 0x0200;
+	if (dy < 0) flags |= 0x0100;
+
+	tgui_wait_engine(tfb);
+	writeb(ROP_P, tfb->regs + 0x2127);
+	writel(color, tfb->regs + OLDCLR);
+	writel(point(x1, y1), tfb->regs + OLDDST);
+	writel(point(ax, ay), tfb->regs + OLDDIM);
+	writel(flags | 0x1000, tfb->regs + DRAWFL); /* Line Draw command */
+	writeb(2, tfb->regs + OLDCMD);
+}
+
 /* Address of first shown pixel in display memory */
 static void set_screen_start(struct pc98tridentfb *tfb, int base)
 {
@@ -1243,6 +1267,48 @@ static void pc98tridentfb_imageblit(struct fb_info *info,
 	}
 }
 
+static int pc98tridentfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
+{
+	struct pc98tridentfb *tfb = info->par;
+
+	if (noaccel || !tfb->mmio)
+		return -EINVAL;
+
+	mutex_lock(&tfb->vram_lock);
+	if (cursor->set & FB_CUR_SETPOS) {
+		tg_crtc_write(tfb, 0x40, cursor->image.dx & 0xff);
+		tg_crtc_write(tfb, 0x41, (cursor->image.dx >> 8) & 0x07);
+		tg_crtc_write(tfb, 0x42, cursor->image.dy & 0xff);
+		tg_crtc_write(tfb, 0x43, (cursor->image.dy >> 8) & 0x07);
+	}
+	if (cursor->set & FB_CUR_SETHOT) {
+		tg_crtc_write(tfb, 0x46, cursor->hot.x & 0x3f);
+		tg_crtc_write(tfb, 0x47, cursor->hot.y & 0x3f);
+	}
+	if (cursor->set & FB_CUR_SETCMAP) {
+		u32 fg = cursor->image.fg_color;
+		u32 bg = cursor->image.bg_color;
+		tg_crtc_write(tfb, 0x49, (bg >> 16) & 0xff);
+		tg_crtc_write(tfb, 0x4a, (bg >> 8) & 0xff);
+		tg_crtc_write(tfb, 0x4b, bg & 0xff);
+		tg_crtc_write(tfb, 0x4c, (fg >> 16) & 0xff);
+		tg_crtc_write(tfb, 0x4d, (fg >> 8) & 0xff);
+		tg_crtc_write(tfb, 0x4e, fg & 0xff);
+	}
+	if (cursor->enable) {
+		/* Set cursor location to top 4 KB of VRAM (offset = 0x3FF000 >> 10) */
+		u32 loc = (tfb->vram_size - 0x1000) >> 10;
+		tg_crtc_write(tfb, 0x44, loc & 0xff);
+		tg_crtc_write(tfb, 0x45, (loc >> 8) & 0x0f);
+		/* Enable 64x64 Hardware Cursor */
+		tg_crtc_write(tfb, 0x48, 0x07);
+	} else {
+		tg_crtc_write(tfb, 0x48, 0x00);
+	}
+	mutex_unlock(&tfb->vram_lock);
+	return 0;
+}
+
 static int pc98tridentfb_sync(struct fb_info *info)
 {
 	struct pc98tridentfb *tfb = info->par;
@@ -1284,6 +1350,7 @@ static const struct fb_ops pc98tridentfb_ops = {
 	.fb_fillrect	= pc98tridentfb_fillrect,
 	.fb_copyarea	= pc98tridentfb_copyarea,
 	.fb_imageblit	= pc98tridentfb_imageblit,
+	.fb_cursor	= pc98tridentfb_cursor,
 	.fb_sync	= pc98tridentfb_sync,
 	.fb_ioctl	= pc98tridentfb_ioctl,
 };
