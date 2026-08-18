@@ -484,6 +484,17 @@ void __init prepare_namespace(void)
 	mount_root(saved_root_name);
 	devtmpfs_mount();
 
+	/* Expose the resolved root device as /dev/root inside devtmpfs.
+	 * The pre-devtmpfs node created by mount_block_root is hidden by the
+	 * devtmpfs mount, and on multi-disk machines the kernel-assigned
+	 * device name (sda/sdb/...) does not identify the boot disk, so
+	 * initramfs-less systems must reference the root by this alias.
+	 * devtmpfs was mounted at the cwd-relative "dev" path, so the node
+	 * is created with a relative path and the cwd is left untouched
+	 * for the subsequent pivot_root(".", "."). */
+	if (ROOT_DEV)
+		create_dev("dev/root", ROOT_DEV);
+
 	if (init_pivot_root(".", ".")) {
 		pr_err("VFS: Failed to pivot into new rootfs\n");
 		return;

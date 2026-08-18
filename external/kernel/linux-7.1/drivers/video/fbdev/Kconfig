@@ -107,6 +107,17 @@ config FB_PC98_CIRRUS
 	  after confirming that the machine has the supported Core-Graph path.
 	  PCI GD75xx laptop LCD controllers are not supported.
 
+config FB_PC98_GDC
+	tristate "NEC PC-9800 native GDC planar framebuffer"
+	depends on FB && X86_PC9800 && HAS_IOPORT
+	select FB_SYSMEM_HELPERS_DEFERRED
+	help
+	  This driver supports the native NEC PC-9800 Graphic Display Controller
+	  (uPD7220 GDC) 16-color planar graphics (640x400 / 640x200 / 640x480).
+	  It provides standard Linux framebuffer access with fast chunky-to-planar
+	  conversion, making it easy to run PC-98 applications, DOS games, and
+	  emulators natively under Linux.
+
 config FB_PC98_TRIDENT
 	tristate "NEC PC-9821 built-in Trident TGUI96xx framebuffer"
 	depends on FB && X86_PC9800 && PCI && HAS_IOPORT

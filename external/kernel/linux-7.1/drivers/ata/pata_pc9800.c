@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/ata_platform.h>
+#include <linux/mutex.h>
 
 #include <asm/pc9800.h>
 
@@ -27,12 +28,14 @@
 #define PC98_ATA_COMMAND_END	0x064e
 #define PC98_ATA_CONTROL	0x074c
 #define PC98_ATA_BANK_SELECT	0x0432
+#define PC98_ATA_IRQ_STATUS	0x0433
 #define PC98_ATA_IRQ		9
 #define PC98_ATA_PORT_SHIFT	1
 #define PC98_ATA_NR_PORTS	2
 
 struct pc98_pata_host {
 	u8 bank_control;
+	struct mutex host_mutex;
 };
 
 static struct scsi_host_template pc98_pata_sht = {
@@ -66,8 +69,13 @@ static void pc98_pata_select_bank(struct ata_port *ap)
 {
 	struct pc98_pata_host *hpriv = ap->host->private_data;
 
-	outb(hpriv->bank_control | (ap->port_no & 1),
-	     PC98_ATA_BANK_SELECT);
+	if (ap->port_no == 1) {
+		outb(hpriv->bank_control, PC98_ATA_BANK_SELECT);
+		iowrite8(0xb0, ap->ioaddr.device_addr);
+		outb(hpriv->bank_control | 1, PC98_ATA_BANK_SELECT);
+	} else {
+		outb(hpriv->bank_control, PC98_ATA_BANK_SELECT);
+	}
 }
 
 static void pc98_pata_dev_select(struct ata_port *ap, unsigned int device)
@@ -122,6 +130,56 @@ static unsigned int pc98_pata_data_xfer(struct ata_queued_cmd *qc,
 	return ata_sff_data_xfer(qc, buf, buflen, rw);
 }
 
+static unsigned int pc98_pata_qc_issue(struct ata_queued_cmd *qc)
+{
+	pc98_pata_select_bank(qc->ap);
+	return ata_sff_qc_issue(qc);
+}
+
+static bool pc98_pata_sff_irq_check(struct ata_port *ap)
+{
+	u8 irq_stat = inb(PC98_ATA_IRQ_STATUS);
+	return (irq_stat & (1 << (ap->port_no & 1))) != 0;
+}
+
+static int pc98_pata_prereset(struct ata_link *link, unsigned long deadline)
+{
+	struct ata_port *ap = link->ap;
+	struct pc98_pata_host *hpriv = ap->host->private_data;
+	int rc;
+
+	mutex_lock(&hpriv->host_mutex);
+	pc98_pata_select_bank(ap);
+	rc = ata_sff_prereset(link, deadline);
+	mutex_unlock(&hpriv->host_mutex);
+	return rc;
+}
+
+static int pc98_pata_softreset(struct ata_link *link, unsigned int *classes,
+			       unsigned long deadline)
+{
+	struct ata_port *ap = link->ap;
+	struct pc98_pata_host *hpriv = ap->host->private_data;
+	int rc;
+
+	mutex_lock(&hpriv->host_mutex);
+	pc98_pata_select_bank(ap);
+	rc = ata_sff_softreset(link, classes, deadline);
+	mutex_unlock(&hpriv->host_mutex);
+	return rc;
+}
+
+static void pc98_pata_postreset(struct ata_link *link, unsigned int *classes)
+{
+	struct ata_port *ap = link->ap;
+	struct pc98_pata_host *hpriv = ap->host->private_data;
+
+	mutex_lock(&hpriv->host_mutex);
+	pc98_pata_select_bank(ap);
+	ata_sff_postreset(link, classes);
+	mutex_unlock(&hpriv->host_mutex);
+}
+
 static int pc98_pata_set_mode(struct ata_link *link,
 			      struct ata_device **unused)
 {
@@ -138,7 +196,7 @@ static int pc98_pata_set_mode(struct ata_link *link,
 
 static struct ata_port_operations pc98_pata_ops = {
 	.inherits		= &ata_sff_port_ops,
-	.cable_detect		= ata_cable_unknown,
+	.cable_detect		= ata_cable_40wire,
 	.set_mode		= pc98_pata_set_mode,
 	.sff_dev_select		= pc98_pata_dev_select,
 	.sff_set_devctl		= pc98_pata_set_devctl,
@@ -148,6 +206,11 @@ static struct ata_port_operations pc98_pata_ops = {
 	.sff_tf_read		= pc98_pata_tf_read,
 	.sff_exec_command	= pc98_pata_exec_command,
 	.sff_data_xfer		= pc98_pata_data_xfer,
+	.sff_irq_check		= pc98_pata_sff_irq_check,
+	.qc_issue		= pc98_pata_qc_issue,
+	.reset.prereset		= pc98_pata_prereset,
+	.reset.softreset	= pc98_pata_softreset,
+	.reset.postreset	= pc98_pata_postreset,
 };
 
 static void pc98_pata_setup_ioaddr(struct ata_ioports *ioaddr,
@@ -208,6 +271,8 @@ static int pc98_pata_probe(struct platform_device *pdev)
 	hpriv = devm_kzalloc(dev, sizeof(*hpriv), GFP_KERNEL);
 	if (!hpriv)
 		return -ENOMEM;
+
+	mutex_init(&hpriv->host_mutex);
 
 	/* Preserve all controller state except the bank-select bit. */
 	hpriv->bank_control = inb(PC98_ATA_BANK_SELECT) & ~BIT(0);

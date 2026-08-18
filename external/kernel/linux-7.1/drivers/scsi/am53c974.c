@@ -8,10 +8,17 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/math64.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 
 #include <scsi/scsi_host.h>
+#include <scsi/scsi_device.h>
+#include <scsi/scsicam.h>
+
+#ifdef CONFIG_X86_PC9800
+#include <asm/pc9800.h>
+#endif
 
 #include "esp_scsi.h"
 
@@ -368,10 +375,57 @@ static void dc390_check_eeprom(struct esp *esp)
 		esp->config4 |= ESP_CONFIG4_RADE | ESP_CONFIG4_RAE;
 }
 
+static int am53c974_bios_param(struct scsi_device *sdev,
+				 struct gendisk *disk, sector_t capacity,
+				 int geometry[])
+{
+#ifdef CONFIG_X86_PC9800
+	unsigned int heads, sectors;
+
+	/* PC-98 SCSI BIOS drives are numbered a0-a7 by target ID.  The boot
+	 * loader records each disk's logical INT 1Bh geometry in the P98D
+	 * setup data; prefer that over the SCSI-CAM geometry estimate so the
+	 * NEC98 partition parser interprets the CHS values the partition
+	 * table was written with. */
+	if (pc9800_get_boot_disk_geometry_for(0xa0, sdev->id,
+					      &heads, &sectors)) {
+		geometry[0] = heads;
+		geometry[1] = sectors;
+		geometry[2] = min_t(sector_t,
+				    div_u64(capacity, heads * sectors),
+				    U16_MAX);
+		return 0;
+	}
+	/* Default to PC-98 standard SCSI geometry (H=8, S=32) for any attached
+	 * SCSI disk not reported in the BIOS P98D table, so the NEC98 partition
+	 * parser calculates the expected cylinder boundaries. */
+	heads = 8;
+	sectors = 32;
+	geometry[0] = heads;
+	geometry[1] = sectors;
+	geometry[2] = min_t(sector_t,
+			    div_u64(capacity, heads * sectors),
+			    U16_MAX);
+	return 0;
+#else
+	return scsicam_bios_param(disk, capacity, geometry);
+#endif
+}
+
+static struct scsi_host_template am53c974_template;
+
 static int pci_esp_probe_one(struct pci_dev *pdev,
 			      const struct pci_device_id *id)
 {
-	const struct scsi_host_template *hostt = &scsi_esp_template;
+	const struct scsi_host_template *hostt;
+
+	/* The shared ESP template has no getgeo override; the PC-98 port
+	 * needs the BIOS geometry for the NEC98 partition parser. */
+	if (!am53c974_template.name)
+		am53c974_template = scsi_esp_template;
+	am53c974_template.module = THIS_MODULE;
+	am53c974_template.bios_param = am53c974_bios_param;
+	hostt = &am53c974_template;
 	int err = -ENODEV;
 	struct Scsi_Host *shost;
 	struct esp *esp;
