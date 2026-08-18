@@ -74,6 +74,16 @@ make -C "$source" O="$kernel_build" ARCH=i386 olddefconfig
 	--disable SERIAL_PC98_8251_CONSOLE \
 	--enable PC98_CONSOLE \
 	--enable EXT4_FS \
+	--enable FAT_FS \
+	--enable VFAT_FS \
+	--enable MSDOS_FS \
+	--enable NLS_CODEPAGE_437 \
+	--enable NLS_CODEPAGE_932 \
+	--enable NLS_ISO8859_1 \
+	--enable NLS_UTF8 \
+	--enable BLK_DEV_SR \
+	--enable ISO9660_FS \
+	--enable JOLIET \
 	--disable BLK_DEV_INITRD \
 	--disable RD_GZIP \
 	--disable RD_BZIP2 \
@@ -84,12 +94,23 @@ make -C "$source" O="$kernel_build" ARCH=i386 olddefconfig
 	--disable RD_ZSTD \
 	--enable DEVTMPFS \
 	--enable DEVTMPFS_MOUNT \
+	--disable STRICT_DEVMEM \
+	--disable IO_STRICT_DEVMEM \
 	--enable MODULES \
 	--disable SND_PCSP \
+	--disable PNPBIOS \
+	--disable ISAPNP \
 	--enable FB \
 	--disable FB_TRIDENT \
 	--module FB_PC98_CIRRUS \
 	--module FB_PC98_TRIDENT \
+	--module FB_PC98_GDC \
+	--module BLK_DEV_FD \
+	--enable INPUT_PCSPKR \
+	--module PARPORT \
+	--module PARPORT_PC \
+	--module PRINTER \
+	--module MOUSE_PC98 \
 	--disable FRAMEBUFFER_CONSOLE \
 	--disable VGA_CONSOLE \
 	--disable SERIO_I8042 \
@@ -97,7 +118,7 @@ make -C "$source" O="$kernel_build" ARCH=i386 olddefconfig
 	--enable CMDLINE_BOOL \
 	--disable CMDLINE_OVERRIDE \
 	--set-str CMDLINE \
-	"$console_args earlyprintk=pc9800 root=/dev/sda2 rootfstype=ext4 rw"
+	"$console_args earlyprintk=pc9800"
 if [ "$kernel_version" = 7.1 ] || [ "$kernel_version" = 7.2 ]; then
 	# Core-Graph is not a conventional PCI VGA function, so fbcon must not
 	# restrict attachment to the framebuffer it considers primary.
@@ -167,6 +188,7 @@ if [ "$device_profile" = pc98 ]; then
 		--disable ISDN \
 		--enable SCSI_LOWLEVEL \
 		--enable SCSI_PC9801_92 \
+		--enable SCSI_AM53C974 \
 		--disable MMC \
 		--disable MEMSTICK \
 		--disable NVME_CORE \
@@ -175,6 +197,21 @@ if [ "$device_profile" = pc98 ]; then
 		--disable INPUT_JOYSTICK \
 		--disable INPUT_TABLET \
 		--disable INPUT_TOUCHSCREEN
+
+	# The low-RAM PC-98 image keeps the ALSA driver catalogue disabled, but
+	# the Roland MPU-PC98 MIDI card needs the raw-MIDI core plus the generic
+	# MPU-401 UART driver (hardware=18 selects its port+2 register layout).
+	# Reset the SND_* tree and keep only the ALSA core here; the MPU-401
+	# modules are re-applied after localmodconfig below.
+	while IFS= read -r symbol; do
+		"$source/scripts/config" --file "$kernel_build/.config" \
+			--disable "$symbol"
+	done < <(sed -n -E 's/^CONFIG_(SND_[^=]*)=(y|m)$/\1/p' \
+		"$kernel_build/.config")
+	"$source/scripts/config" --file "$kernel_build/.config" \
+		--enable SOUND \
+		--enable SND \
+		--enable SND_DRIVERS
 
 	# USB and HID have many vendor-specific drivers without a common Kconfig
 	# switch. Reset them, then retain the host controllers and generic class
@@ -260,6 +297,22 @@ if [ "$device_profile" = pc98 ]; then
 	yes "" | make -C "$source" O="$kernel_build" ARCH=i386 \
 		LSMOD="$repo/configs/pc9800-modules.list" localmodconfig
 	set -o pipefail
+	# localmodconfig cannot follow the MPU-401 select chain (SND_MPU401
+	# selects SND_MPU401_UART which selects SND_RAWMIDI), so it drops the
+	# MIDI modules; re-apply the minimal ALSA MIDI set after it.
+	"$source/scripts/config" --file "$kernel_build/.config" \
+		--enable SOUND \
+		--enable SND \
+		--enable SND_DRIVERS \
+		--module SND_RAWMIDI \
+		--module SND_MPU401_UART \
+		--module SND_MPU401 \
+		--module FB_PC98_GDC \
+		--module BLK_DEV_FD \
+		--enable INPUT_PCSPKR \
+		--module PARPORT \
+		--module PARPORT_PC \
+		--module PRINTER
 	# PC-9821 Ra43's onboard PC-9821X-B06-compatible adapter is an
 	# Intel 82557 (8086:1229, subsystem 1033:8000).  Keep e100 built in
 	# so the minimal, module-free i486 rootfs can use the real adapter.
@@ -268,6 +321,7 @@ if [ "$device_profile" = pc98 ]; then
 	"$source/scripts/config" --file "$kernel_build/.config" \
 		--enable SCSI_LOWLEVEL \
 		--enable SCSI_PC9801_92 \
+		--enable SCSI_AM53C974 \
 		--enable NET_VENDOR_INTEL \
 		--enable E100 \
 		--enable MII \

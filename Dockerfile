@@ -17,6 +17,15 @@ RUN sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' \
     && printf 'builder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/builder \
     && chmod 0440 /etc/sudoers.d/builder
 
+# zig is needed by ./build.sh tools to cross-build the static i486 musl
+# pc98snd player (the host's 32-bit glibc is SSE2-built and SIGILLs on
+# pre-SSE PC-98 CPUs).  zig is not packaged by Debian, so fetch the
+# official tarball.
+ARG ZIG_VERSION=0.16.0
+RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+        | tar -xJ -C /opt \
+    && ln -s "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
+
 WORKDIR /work/linux-pc98
 VOLUME ["/work/linux-pc98"]
 USER builder

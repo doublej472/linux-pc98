@@ -20,8 +20,12 @@
 #include <asm/io_apic.h>
 #include <asm/cpufeature.h>
 #include <asm/desc.h>
+#include <asm/setup.h>
 #include <asm/set_memory.h>
 #include <asm/debugreg.h>
+#ifdef CONFIG_X86_PC9800
+#include <asm/pc9800.h>
+#endif
 
 static void load_segments(void)
 {
@@ -219,12 +223,22 @@ void machine_kexec(struct kimage *image)
 	native_idt_invalidate();
 	native_gdt_invalidate();
 
+#ifdef CONFIG_X86_PC9800
+	/*
+	 * On PC-98, clean up active hardware before transferring control:
+	 * un-relay video, silence sound card timers, restore IDE Bank 0,
+	 * silence buzzer, and mask PIC interrupts.
+	 */
+	pc9800_clean_hardware();
+#endif
+
 	/* now call it */
 	image->start = relocate_kernel_ptr((unsigned long)image->head,
 					   (unsigned long)page_list,
 					   image->start,
 					   boot_cpu_has(X86_FEATURE_PAE),
-					   image->preserve_context);
+					   image->preserve_context,
+					   __pa(&boot_params));
 
 #ifdef CONFIG_KEXEC_JUMP
 	if (image->preserve_context)

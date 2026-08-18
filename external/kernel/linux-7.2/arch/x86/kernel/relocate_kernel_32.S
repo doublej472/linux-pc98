@@ -35,6 +35,7 @@
 #define CP_PA_PGD		DATA(0x14)
 #define CP_PA_SWAP_PAGE		DATA(0x18)
 #define CP_PA_BACKUP_PAGES_MAP	DATA(0x1c)
+#define CP_BOOT_PARAMS_PA	DATA(0x20)
 
 	.text
 SYM_CODE_START_NOALIGN(relocate_kernel)
@@ -62,6 +63,7 @@ SYM_CODE_START_NOALIGN(relocate_kernel)
 	movl  20+12(%esp), %edx /* start address */
 	movl  20+16(%esp), %ecx /* cpu_has_pae */
 	movl  20+20(%esp), %esi /* preserve_context */
+	movl  20+24(%esp), %eax /* boot_params_pa */
 
 	/* zero out flags, and disable interrupts */
 	pushl $0
@@ -69,6 +71,7 @@ SYM_CODE_START_NOALIGN(relocate_kernel)
 
 	/* save some information for jumping back */
 	movl	PTR(VA_CONTROL_PAGE)(%ebp), %edi
+	movl	%eax, CP_BOOT_PARAMS_PA(%edi)
 	movl	%edi, CP_VA_CONTROL_PAGE(%edi)
 	movl	PTR(PA_PGD)(%ebp), %eax
 	movl	%eax, CP_PA_PGD(%edi)
@@ -156,12 +159,12 @@ SYM_CODE_START_LOCAL_NOALIGN(identity_mapped)
 
 	testl	%esi, %esi
 	jnz 1f
+	movl	CP_BOOT_PARAMS_PA(%edi), %esi
 	xorl	%edi, %edi
 	xorl	%eax, %eax
 	xorl	%ebx, %ebx
 	xorl    %ecx, %ecx
 	xorl    %edx, %edx
-	xorl    %esi, %esi
 	xorl    %ebp, %ebp
 	ANNOTATE_UNRET_SAFE
 	ret

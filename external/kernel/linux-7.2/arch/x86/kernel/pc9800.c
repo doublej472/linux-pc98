@@ -17,9 +17,11 @@
  * Copyright (C) 2026 Awe Morris
  */
 #include <linux/bcd.h>
+#include <linux/delay.h>
 #include <linux/export.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/pm.h>
 #include <linux/time.h>
 #include <linux/timex.h>
 
@@ -144,8 +146,36 @@ EXPORT_SYMBOL_GPL(pc9800_get_boot_disk_geometry_for);
 #define RTC_CMD_SHIFT	0x01
 #define RTC_CMD_READ	0x03
 
+void pc9800_clean_hardware(void)
+{
+	/* 1. Un-relay video back to standard text GDC */
+	outb(0x00, 0x0fac);
+	inb(PC98_IO_WAIT);
+	outb(0x0e, 0x0068);	/* GDC graphic screen OFF */
+	inb(PC98_IO_WAIT);
+	outb(0x0c, 0x0068);	/* GDC color mode */
+	inb(PC98_IO_WAIT);
+
+	/* 2. Silence PC-9801-86 / OPNA timers and audio */
+	outb(0x27, 0x0188);
+	outb(0x30, 0x018a);	/* Reset Timer-A/B */
+	outb(0x29, 0x0188);
+	outb(0x00, 0x018a);	/* Interrupt enable = 0 */
+
+	/* 3. Restore IDE Bank 0 for BIOS INT 1Bh */
+	outb(0x00, 0x0432);
+
+	/* 4. Silence buzzer / speaker */
+	outb(0x00, 0x0035);
+
+	/* 5. Mask 8259 PIC interrupts */
+	outb(0xff, 0x0002);
+	outb(0xff, 0x000a);
+}
+
 static void pc9800_emergency_restart(void)
 {
+	pc9800_clean_hardware();
 	for (;;) {
 		outb(0, PC98_RESET_PORT);
 		native_halt();
@@ -155,6 +185,20 @@ static void pc9800_emergency_restart(void)
 static void pc9800_restart(char *cmd)
 {
 	pc9800_emergency_restart();
+}
+
+static void pc9800_power_off(void)
+{
+	pc9800_clean_hardware();
+
+	/* Attempt PC-9821 hardware soft power-off */
+	outb(0x0f, 0x08e0);
+	outb(0x00, 0x08e2);
+	mdelay(100);
+
+	/* Fallback: halt CPU */
+	for (;;)
+		native_halt();
 }
 
 /*
@@ -261,6 +305,8 @@ static int __init pc9800_reboot_init(void)
 {
 	machine_ops.restart = pc9800_restart;
 	machine_ops.emergency_restart = pc9800_emergency_restart;
+	machine_ops.power_off = pc9800_power_off;
+	pm_power_off = pc9800_power_off;
 	return 0;
 }
 arch_initcall(pc9800_reboot_init);

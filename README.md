@@ -190,8 +190,14 @@ The individual build stages can also be run separately:
 ```sh
 ./build.sh rootfs debian13-i486
 ./build.sh kernel --cpu 486
+./build.sh tools
 ./build.sh image debian13-i486-ide
 ```
+
+`./build.sh tools` builds the `pc98snd` userspace player and its kernel
+module, then stages both into the root filesystem (module auto-load via
+`/etc/modules` and a fresh `depmod` index).  It requires `zig` and a
+configured `build/kernel-7.1-i486` tree, so run it after the kernel build.
 
 To build the complete public artifact set with canonical filenames:
 

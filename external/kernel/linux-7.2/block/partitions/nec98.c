@@ -178,8 +178,46 @@ int nec98_partition(struct parsed_partitions *state)
 		return -1;
 	if (!nec98_table_valid((const struct nec98_partition *)table,
 			       heads, sectors, capacity)) {
-		put_dev_sector(table_sector);
-		return 0;
+		/* The table was written in the disk's BIOS logical geometry.
+		 * Try the boot disk's geometry, followed by standard PC-98
+		 * candidate geometries (8/32 SCSI, 8/17 IDE, 16/63 large IDE). */
+		static const struct { unsigned int h; unsigned int s; } candidates[] = {
+			{ 8, 32 },
+			{ 8, 17 },
+			{ 16, 63 },
+		};
+		unsigned int try_h, try_s;
+		bool matched = false;
+
+		if (pc9800_get_boot_disk_geometry(&try_h, &try_s) &&
+		    (try_h != heads || try_s != sectors) &&
+		    nec98_table_valid((const struct nec98_partition *)table,
+				       try_h, try_s, capacity)) {
+			heads = try_h;
+			sectors = try_s;
+			matched = true;
+		}
+
+		if (!matched) {
+			for (i = 0; i < ARRAY_SIZE(candidates); i++) {
+				try_h = candidates[i].h;
+				try_s = candidates[i].s;
+				if (try_h == heads && try_s == sectors)
+					continue;
+				if (nec98_table_valid((const struct nec98_partition *)table,
+						       try_h, try_s, capacity)) {
+					heads = try_h;
+					sectors = try_s;
+					matched = true;
+					break;
+				}
+			}
+		}
+
+		if (!matched) {
+			put_dev_sector(table_sector);
+			return 0;
+		}
 	}
 
 	entry = (const struct nec98_partition *)table;

@@ -124,7 +124,8 @@ relocate_kernel_fn(unsigned long indirection_page,
 		   unsigned long control_page,
 		   unsigned long start_address,
 		   unsigned int has_pae,
-		   unsigned int preserve_context);
+		   unsigned int preserve_context,
+		   unsigned long boot_params_pa);
 #else
 typedef unsigned long
 relocate_kernel_fn(unsigned long indirection_page,
