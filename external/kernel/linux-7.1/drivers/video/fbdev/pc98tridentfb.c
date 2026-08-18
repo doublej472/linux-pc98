@@ -965,6 +965,10 @@ static void tg_set_mode(struct pc98tridentfb *tfb, const struct tg_mode_entry *m
 	if (tfb->vram_size >= 0x200000)
 		tg_crtc_write(tfb, 0x5e, tg_crtc_read(tfb, 0x5e) | 0x01);
 
+	/* Set PCI prefetch buffer depth and fast DRAM RAS-to-CAS timing */
+	tg_crtc_write(tfb, 0x54, 0x0f);
+	tg_crtc_write(tfb, 0x59, tg_crtc_read(tfb, 0x59) | 0x0c);
+
 	tg_crtc_write(tfb, 0x50, 0);
 
 	for (i = 0; i <= 4; i++)
@@ -1048,18 +1052,39 @@ static int pc98tridentfb_check_var(struct fb_var_screeninfo *var,
 		var->yres_virtual = m->yres;
 	var->xoffset = 0;
 	var->yoffset = 0;
-	var->bits_per_pixel = TG_BPP;
 	var->grayscale = 0;
 
-	/* 8-bit Pseudocolor colormap */
-	var->red.offset = 0;
-	var->red.length = 8;
-	var->green.offset = 0;
-	var->green.length = 8;
-	var->blue.offset = 0;
-	var->blue.length = 8;
-	var->transp.offset = 0;
-	var->transp.length = 0;
+	if (var->bits_per_pixel <= 8) {
+		var->bits_per_pixel = 8;
+		var->red.offset = 0;
+		var->red.length = 8;
+		var->green.offset = 0;
+		var->green.length = 8;
+		var->blue.offset = 0;
+		var->blue.length = 8;
+		var->transp.offset = 0;
+		var->transp.length = 0;
+	} else if (var->bits_per_pixel <= 16) {
+		var->bits_per_pixel = 16;
+		var->red.offset = 11;
+		var->red.length = 5;
+		var->green.offset = 5;
+		var->green.length = 6;
+		var->blue.offset = 0;
+		var->blue.length = 5;
+		var->transp.offset = 0;
+		var->transp.length = 0;
+	} else {
+		var->bits_per_pixel = 32;
+		var->red.offset = 16;
+		var->red.length = 8;
+		var->green.offset = 8;
+		var->green.length = 8;
+		var->blue.offset = 0;
+		var->blue.length = 8;
+		var->transp.offset = 24;
+		var->transp.length = 8;
+	}
 
 	return 0;
 }
@@ -1100,15 +1125,36 @@ static int pc98tridentfb_blank(int blank, struct fb_info *info)
 {
 	struct pc98tridentfb *tfb = info->par;
 	unsigned long flags;
-	u8 value;
+	u8 sr01, cr23;
 
 	spin_lock_irqsave(&tfb->reg_lock, flags);
-	value = tg_seq_read(tfb, 0x01);
-	if (blank == FB_BLANK_UNBLANK)
-		value &= ~0x20;
-	else
-		value |= 0x20;
-	tg_seq_write(tfb, 0x01, value);
+	sr01 = tg_seq_read(tfb, 0x01);
+	cr23 = tg_crtc_read(tfb, 0x23);
+
+	switch (blank) {
+	case FB_BLANK_UNBLANK:
+		sr01 &= ~0x20;
+		cr23 &= ~0xC0; /* Restore HSync and VSync */
+		break;
+	case FB_BLANK_NORMAL:
+		sr01 |= 0x20;  /* Blank display output */
+		break;
+	case FB_BLANK_VSYNC_SUSPEND:
+		sr01 |= 0x20;
+		cr23 = (cr23 & ~0xC0) | 0x80; /* Suspend VSync */
+		break;
+	case FB_BLANK_HSYNC_SUSPEND:
+		sr01 |= 0x20;
+		cr23 = (cr23 & ~0xC0) | 0x40; /* Suspend HSync */
+		break;
+	case FB_BLANK_POWERDOWN:
+		sr01 |= 0x20;
+		cr23 |= 0xC0;  /* Suspend both HSync and VSync for DPMS sleep */
+		break;
+	}
+
+	tg_seq_write(tfb, 0x01, sr01);
+	tg_crtc_write(tfb, 0x23, cr23);
 	spin_unlock_irqrestore(&tfb->reg_lock, flags);
 	return 0;
 }
