@@ -105,6 +105,8 @@ sudo install -m 0755 "$repo/build/tools/pc98-boss-battle" \
 	"$root_stage/usr/sbin/pc98-boss-battle"
 sudo install -m 0755 "$repo/build/tools/pc98-benchmark" \
 	"$root_stage/usr/sbin/pc98-benchmark"
+sudo install -m 0755 "$repo/build/tools/pc98-trident-bench" \
+	"$root_stage/usr/sbin/pc98-trident-bench"
 sudo install -m 0755 "$repo/build/tools/test_libpc98" \
 	"$root_stage/usr/sbin/test_libpc98"
 sudo mkdir -p "$root_stage/usr/include"

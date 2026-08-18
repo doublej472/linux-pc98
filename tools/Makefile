@@ -18,6 +18,7 @@ TIMESYNC:= $(OUT)/pc98-timesync
 DEMO    := $(OUT)/pc98-demo-game
 TEST_SUITE := $(OUT)/test_libpc98
 BENCH   := $(OUT)/pc98-benchmark
+TRIDENT_BENCH := $(OUT)/pc98-trident-bench
 
 SEQ    := pmdmini/src/pmdwin
 YM     := pmdmini/src/ymfm
@@ -47,7 +48,7 @@ OBJS := \
 	$(BUILD)/file_fmgen.o \
 	$(BUILD)/sjis2utf.o
 
-all: $(TARGET) $(TIMESYNC) $(DEMO) $(TEST_SUITE) $(BENCH)
+all: $(TARGET) $(TIMESYNC) $(DEMO) $(TEST_SUITE) $(BENCH) $(TRIDENT_BENCH)
 
 $(TARGET): $(OBJS)
 	mkdir -p $(OUT)
@@ -68,6 +69,10 @@ $(TEST_SUITE): test_libpc98.c $(BUILD)/opna.o $(BUILD)/opna_hw_c.o
 $(BENCH): bench.c $(BUILD)/opna.o $(BUILD)/opna_hw_c.o
 	mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) -o $@ bench.c $(BUILD)/opna.o $(BUILD)/opna_hw_c.o
+
+$(TRIDENT_BENCH): diag/trident_bench.c
+	mkdir -p $(OUT)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ diag/trident_bench.c
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -115,6 +120,6 @@ $(BUILD)/sjis2utf.o: $(YM)/sjis2utf.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c -o $@ $<
 
 clean:
-	rm -rf $(BUILD) $(TARGET) $(TIMESYNC) $(DEMO) $(TEST_SUITE) $(BENCH)
+	rm -rf $(BUILD) $(TARGET) $(TIMESYNC) $(DEMO) $(TEST_SUITE) $(BENCH) $(TRIDENT_BENCH)
 
 .PHONY: all clean
