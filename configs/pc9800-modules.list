@@ -14,3 +14,12 @@ cdc_wdm
 usbnet
 cdc_ether
 cdc_ncm
+snd_mpu401
+snd_mpu401_uart
+snd_rawmidi
+pc98busmouse
+pc98gdcfb
+floppy
+parport
+parport_pc
+lp

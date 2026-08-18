@@ -79,6 +79,7 @@ obj-$(CONFIG_FB_GBE)              += gbefb.o
 obj-$(CONFIG_FB_CIRRUS)		  += cirrusfb.o
 obj-$(CONFIG_FB_PC98_CIRRUS)	  += pc98cirrusfb.o
 obj-$(CONFIG_FB_PC98_TRIDENT)	  += pc98tridentfb.o
+obj-$(CONFIG_FB_PC98_GDC)	  += pc98gdcfb.o
 obj-$(CONFIG_FB_ASILIANT)	  += asiliantfb.o
 obj-$(CONFIG_FB_PXA)		  += pxafb.o
 obj-$(CONFIG_FB_PXA168)		  += pxa168fb.o
